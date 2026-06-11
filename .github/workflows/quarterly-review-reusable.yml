@@ -1,0 +1,69 @@
+name: Quarterly Legal Review (reusable)
+
+# Reusable workflow: opens a quarterly legal review issue in the calling repo.
+#
+# Caller pattern:
+#   on:
+#     schedule:
+#       - cron: '0 9 1 1,4,7,10 *'
+#     workflow_dispatch: {}
+#   permissions:
+#     issues: write
+#   jobs:
+#     quarterly-review:
+#       uses: infra-commons/legal/.github/workflows/quarterly-review-reusable.yml@main
+#       with:
+#         jurisdictions: 'NZ,AU'   # or 'NZ,JP' for KLS Japan
+
+permissions: {}
+
+on:
+  workflow_call:
+    inputs:
+      jurisdictions:
+        description: 'Comma-separated legal jurisdictions, e.g. "NZ,AU" or "NZ,JP"'
+        required: false
+        default: 'NZ,AU'
+        type: string
+
+jobs:
+  open-review-issue:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Open quarterly review issue
+        uses: actions/github-script@v9
+        env:
+          JURISDICTIONS: ${{ inputs.jurisdictions }}
+        with:
+          script: |
+            const now = new Date();
+            const quarter = Math.ceil((now.getMonth() + 1) / 3);
+            const jurisdictions = process.env.JURISDICTIONS || 'NZ,AU';
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `Quarterly legal review — Q${quarter} ${now.getFullYear()}`,
+              body: [
+                '## Quarterly Legal Review',
+                '',
+                'Opened automatically each quarter. Work through this checklist and close when done.',
+                '',
+                '### Document review',
+                '- [ ] Any contracts signed this quarter properly filed in Google Drive?',
+                '- [ ] Any contract templates needing updates based on client feedback or disputes?',
+                '- [ ] Any new sub-processors or data processors added? Update the DPA.',
+                '',
+                '### Compliance',
+                `- [ ] Review recent regulatory updates for jurisdictions: ${jurisdictions}`,
+                '- [ ] Any AI governance or privacy law changes requiring template updates?',
+                '- [ ] Any outstanding legal AI review findings that need resolution?',
+                '',
+                '### IP and licensing',
+                '- [ ] Any new third-party libraries or services with IP implications?',
+                '- [ ] Any open-source usage requiring licence compliance review?',
+                '',
+                'Close this issue when all items are reviewed.',
+              ].join('\n'),
+            });

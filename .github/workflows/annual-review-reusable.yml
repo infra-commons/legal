@@ -1,0 +1,67 @@
+name: Annual Legal Review (reusable)
+
+# Reusable workflow: opens an annual legal review issue in the calling repo.
+#
+# Caller pattern:
+#   on:
+#     schedule:
+#       - cron: '0 9 30 5 *'
+#     workflow_dispatch: {}
+#   permissions:
+#     issues: write
+#   jobs:
+#     annual-review:
+#       uses: infra-commons/legal/.github/workflows/annual-review-reusable.yml@main
+#       with:
+#         jurisdictions: 'NZ,AU'   # or 'NZ,JP' for KLS Japan
+
+permissions: {}
+
+on:
+  workflow_call:
+    inputs:
+      jurisdictions:
+        description: 'Comma-separated legal jurisdictions, e.g. "NZ,AU" or "NZ,JP"'
+        required: false
+        default: 'NZ,AU'
+        type: string
+
+jobs:
+  open-review-issue:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Open annual review issue
+        uses: actions/github-script@v9
+        env:
+          JURISDICTIONS: ${{ inputs.jurisdictions }}
+        with:
+          script: |
+            const jurisdictions = process.env.JURISDICTIONS || 'NZ,AU';
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `Annual legal review — ${new Date().getFullYear()}`,
+              body: [
+                '## Annual Legal Review',
+                '',
+                'This issue is opened automatically each year as a reminder to review all legal documents in this repository.',
+                '',
+                '### Checklist',
+                '',
+                '- [ ] Review and update MSA template (`templates/msa.md`)',
+                '- [ ] Review and update NDA template (`templates/nda.md`)',
+                '- [ ] Review and update DPA template (`templates/dpa.md`)',
+                '- [ ] Review and update SOW template (`templates/sow.md`)',
+                '- [ ] Review and update Privacy Policy (`policies/privacy-policy.md`)',
+                '- [ ] Review and update Terms of Service (`policies/terms-of-service.md`)',
+                '- [ ] Confirm signed copies in Google Drive are current',
+                `- [ ] Check for new regulatory requirements (jurisdictions: ${jurisdictions})`,
+                '',
+                '### Notes',
+                '- Signed agreements live in Google Drive — not in this repo',
+                '- No auto-merge on this repo — all changes require pull request and manual review',
+                '- Close this issue when all items are checked',
+              ].join('\n'),
+            });
