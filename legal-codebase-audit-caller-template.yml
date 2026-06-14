@@ -1,0 +1,33 @@
+# Template: copy this to .github/workflows/legal-codebase-audit.yml in any repo.
+# Trigger via: Actions → Legal codebase audit → Run workflow
+# Findings are filed as GitHub Issues labelled [legal-audit].
+#
+# For KLS Japan repos, change jurisdictions to 'NZ,JP'
+
+name: Legal codebase audit
+
+on:
+  workflow_dispatch:
+    inputs:
+      jurisdictions:
+        description: 'Legal jurisdictions (NZ,AU or NZ,JP)'
+        required: false
+        default: 'NZ,AU'
+        type: string
+      max_files:
+        description: 'Max files to scan (cost guard)'
+        required: false
+        default: '80'
+        type: string
+
+jobs:
+  scan:
+    uses: infra-commons/legal/.github/workflows/legal-codebase-scan-reusable.yml@REPLACE_WITH_SHA
+    with:
+      jurisdictions: ${{ inputs.jurisdictions }}
+      max_files: ${{ inputs.max_files }}
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    permissions:
+      contents: read
+      issues: write
