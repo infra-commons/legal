@@ -1,0 +1,41 @@
+# Canonical legal-review suppressions for the infra-commons portfolio.
+#
+# These entries suppress recurring by-design findings that the AI reviewer generates
+# because it cannot distinguish first-party shared infrastructure from third-party
+# dependencies. Each entity repo's own `.github/legal-review-suppressions.yml` can
+# add repo-specific entries; canonical entries here take precedence on id collision.
+#
+# Format:
+#   suppressions:
+#     - id: unique-kebab-case-id            # required; canonical-wins on id collision
+#       file_pattern: "regex"               # matched against finding location
+#       finding_pattern: "regex"            # matched against finding title + description
+#       reason: "Why this is a false positive for this portfolio"
+#
+# Severity capped: CRITICAL findings are never suppressed — only HIGH/MEDIUM/LOW.
+
+suppressions:
+  - id: "first-party-reusable-workflow"
+    file_pattern: ".*"
+    finding_pattern: "reusable workflow.{0,40}(external|third.party)|third.party.{0,40}reusable"
+    reason: "infra-commons/* reusables are first-party — SHA-pinned supply chain, not external vendors"
+
+  - id: "anthropic-api-key-own-reusable"
+    file_pattern: ".*"
+    finding_pattern: "ANTHROPIC_API_KEY.{0,60}(external|third.party|reusable)|reusable.{0,40}ANTHROPIC_API_KEY"
+    reason: "ANTHROPIC_API_KEY is passed to our own infra-commons/legal and infra-commons/security reusables, documented in sub-processor register"
+
+  - id: "static-jurisdictions-literal"
+    file_pattern: ".*"
+    finding_pattern: "jurisdictions.{0,40}(user.input|unsanitised|injection|arbitrary)"
+    reason: "jurisdictions input is a static caller literal (e.g. 'NZ,AU'), not user-controlled at runtime"
+
+  - id: "static-max-files-literal"
+    file_pattern: ".*"
+    finding_pattern: "max_files.{0,40}(user.input|unsanitised|injection|arbitrary)"
+    reason: "max_files input is a static caller literal, not user-controlled at runtime"
+
+  - id: "suppression-audit-governance"
+    file_pattern: ".*"
+    finding_pattern: "suppression.{0,40}(bypass|self.auth|circular)|ai.self.authored"
+    reason: "Suppressions are governed by PR review and the suppression-audit action; they are not self-authorised"
