@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/infra-commons/legal/main/schema/contracts.schema.json",
+  "title": "Client contract and signature tracking",
+  "description": "Shareable $defs block for per-client contract and signature status. Embed in an org's clients-config client.schema.json to track MSA/DPA signing state and enable the signed-DPA deploy gate.",
+
+  "$defs": {
+
+    "contracts": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Signature status for the agreements this client must have in place before a production deploy. Optional — omit for test/sandbox clients that are never subject to the deploy gate.",
+      "properties": {
+        "msa": { "$ref": "#/$defs/agreement" },
+        "dpa": { "$ref": "#/$defs/agreement" }
+      }
+    },
+
+    "agreement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status"],
+      "description": "Status of a single named agreement (MSA, DPA, etc.).",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["none", "sent", "signed", "superseded"],
+          "description": "Lifecycle state: none=not yet issued; sent=issued awaiting signature; signed=fully executed; superseded=replaced by a newer version (keep the old record; add a new agreement entry)."
+        },
+        "signed_date": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+          "description": "ISO 8601 date the agreement was countersigned by both parties (YYYY-MM-DD). Required when status=signed or superseded."
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Agreement version string (e.g. '1.0', '2026-Q2'). Monotonically increasing — bump on each new execution."
+        },
+        "signed_original_link": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Canonical link to the fully executed document (Google Drive URL or path). Treated as an opaque locator — no access check is performed by the deploy gate."
+        },
+        "sub_processors_current_as_of": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+          "description": "Date (YYYY-MM-DD) through which the sub-processor list disclosed in this agreement was accurate. If the live config's sub-processor list has a later change date, the deploy gate fails. Applicable to DPA; omit for MSA."
+        },
+        "amendments": {
+          "type": "array",
+          "description": "Ordered list of post-signature amendments (change notices) to this agreement, newest last.",
+          "items": {
+            "$ref": "#/$defs/amendment"
+          }
+        }
+      }
+    },
+
+    "amendment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["date", "note"],
+      "description": "A post-signature change to an agreement (e.g. a §5.3 sub-processor change notice).",
+      "properties": {
+        "date": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+          "description": "Effective date of the amendment (YYYY-MM-DD)."
+        },
+        "note": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Human-readable summary of what changed (e.g. 'Sub-processor residency changed: Anthropic AU Foundry → Anthropic US direct API')."
+        },
+        "link": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Optional link to the signed amendment document (Google Drive URL or path)."
+        }
+      }
+    }
+
+  }
+}
