@@ -105,6 +105,12 @@ jobs:
               "https://raw.githubusercontent.com/infra-commons/security/main"
               "/.github/legal-review-suppressions.yml"
           )
+          # Per-repo suppressions: an optional `.github/legal-review-suppressions.yml` in the
+          # CALLING repo (checked out in the working dir above), merged with the canonical
+          # platform file. Solution-specific accepted classes that must NOT live in the public
+          # canonical file (they may reference private/PII context) belong here. Same schema.
+          REPO_LOCAL_SUPPRESSIONS_PATH = ".github/legal-review-suppressions.yml"
+          MAX_SUPPRESSIONS_BYTES = 256_000  # bound runner memory on a hostile/huge file
           MAX_DIFF_CHARS = 60_000
           MODEL = "claude-sonnet-4-6"
           ALLOWED_SEVERITIES = {"CRITICAL", "HIGH", "MEDIUM", "LOW"}
@@ -412,24 +418,47 @@ jobs:
               return m.group(1) if m else None
 
 
-          def load_legal_suppressions() -> list[dict]:
-              """Download and parse the canonical legal-review suppression config.
+          def _load_repo_local_suppressions() -> list[dict]:
+              """Parse the optional per-repo .github/legal-review-suppressions.yml from the
+              caller repo checked out in the working dir. Returns [] on absence, an oversized
+              file, or any parse error -- never hard-fails."""
+              try:
+                  if not os.path.isfile(REPO_LOCAL_SUPPRESSIONS_PATH):
+                      return []
+                  if os.path.getsize(REPO_LOCAL_SUPPRESSIONS_PATH) > MAX_SUPPRESSIONS_BYTES:
+                      print(f"Warning: {REPO_LOCAL_SUPPRESSIONS_PATH} exceeds "
+                            f"{MAX_SUPPRESSIONS_BYTES} bytes -- ignoring", file=sys.stderr)
+                      return []
+                  with open(REPO_LOCAL_SUPPRESSIONS_PATH, encoding="utf-8") as fh:
+                      data = yaml.safe_load(fh.read())
+                  entries = (data or {}).get("suppressions", []) if isinstance(data, dict) else []
+                  valid = [e for e in entries if isinstance(e, dict) and e.get("id")]
+                  print(f"  Loaded {len(valid)} per-repo legal suppression(s) from {REPO_LOCAL_SUPPRESSIONS_PATH}")
+                  return valid
+              except Exception as exc:
+                  print(f"Warning: could not load per-repo legal suppressions: {exc}", file=sys.stderr)
+                  return []
 
-              Fetches .github/legal-review-suppressions.yml from the public
-              infra-commons/security repo. Returns an empty list on any failure so
-              the workflow continues without suppression rather than hard-failing.
+
+          def load_legal_suppressions() -> list[dict]:
+              """Canonical platform suppressions (public infra-commons/security file) merged with
+              the optional per-repo .github/legal-review-suppressions.yml from the calling repo.
+
+              A finding is suppressed if it matches ANY rule (union), so plain concatenation is
+              correct. Either source failing degrades to the other rather than hard-failing, so
+              the workflow continues without that layer of suppression instead of erroring.
               """
+              canonical: list[dict] = []
               try:
                   resp = httpx.get(LEGAL_SUPPRESSIONS_URL, timeout=10.0, follow_redirects=True)
                   resp.raise_for_status()
                   data = yaml.safe_load(resp.text)
                   entries = (data or {}).get("suppressions", []) if isinstance(data, dict) else []
-                  valid = [e for e in entries if isinstance(e, dict) and e.get("id")]
-                  print(f"  Loaded {len(valid)} canonical legal suppression(s)")
-                  return valid
+                  canonical = [e for e in entries if isinstance(e, dict) and e.get("id")]
+                  print(f"  Loaded {len(canonical)} canonical legal suppression(s)")
               except Exception as exc:
                   print(f"Warning: could not load canonical legal suppressions: {exc}", file=sys.stderr)
-                  return []
+              return canonical + _load_repo_local_suppressions()
 
 
           def is_legal_suppressed(finding: dict, suppressions: list[dict]) -> tuple[bool, str | None]:
