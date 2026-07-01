@@ -255,7 +255,12 @@ jobs:
               if not _SHA_RE.match(before) or not _SHA_RE.match(after):
                   raise ValueError(f"Invalid commit SHA: before={before!r} after={after!r}")
               result = subprocess.run(
-                  ["git", "diff", f"{before}...{after}"],
+                  # Exclude the review suppression files from the reviewed diff:
+                  # editing a suppression entry must never be re-reviewed as a
+                  # finding, otherwise suppressing a false positive itself gets
+                  # flagged (an infinite-noise loop). They are config, not code.
+                  ["git", "diff", f"{before}...{after}",
+                   "--", ".", ":(exclude,glob).github/*-suppressions.yml"],
                   capture_output=True, encoding="utf-8", errors="replace", check=True,
               )
               diff = result.stdout
@@ -384,7 +389,14 @@ jobs:
 
 
           def suppressed_issue_keys(token: str, repo: str) -> set[str]:
-              """Return title strings and location keys for closed wont-fix issues."""
+              """Title/location keys for closed legal issues that must never be re-filed.
+
+              A finding closed as **not planned** (state_reason) or carrying the
+              **wont-fix** label is a durable suppression: the reviewer deliberately
+              decided not to act on it, so later merges touching the same code must
+              not re-file it. Issues closed as *completed* are intentionally NOT
+              suppressed -- if such a finding recurs it is a regression worth surfacing.
+              """
               keys: set[str] = set()
               with httpx.Client(timeout=_TIMEOUT) as client:
                   page = 1
@@ -392,11 +404,14 @@ jobs:
                       resp = client.get(
                           f"{GITHUB_API}/repos/{repo}/issues",
                           headers=_headers(token),
-                          params={"labels": "wont-fix", "state": "closed", "per_page": 100, "page": page},
+                          params={"labels": "legal", "state": "closed", "per_page": 100, "page": page},
                       )
                       resp.raise_for_status()
                       batch = resp.json()
                       for issue in batch:
+                          labels = {lbl.get("name") for lbl in issue.get("labels", [])}
+                          if issue.get("state_reason") != "not_planned" and "wont-fix" not in labels:
+                              continue
                           title = issue["title"]
                           keys.add(title)
                           loc = _location_key(title)
@@ -407,6 +422,11 @@ jobs:
                       page += 1
               return keys
 
+
+          # Defence in depth alongside the diff pathspec exclusion: drop any finding
+          # whose location points at a review suppression file, so a suppression edit
+          # can never be re-filed as a finding even if it reached the model.
+          _SUPPRESSION_LOC_RE = re.compile(r'\.github/[^\s:]*-suppressions\.ya?ml', re.IGNORECASE)
 
           _ISSUE_PREFIX_RE = re.compile(
               r'(\[Legal\]\[legal-ai\]\[[A-Z]+\] .+?) -- '
@@ -582,6 +602,9 @@ jobs:
                   sev = raw_sev if raw_sev in _VALID_SEVERITIES else "LOW"
                   title = issue_title(finding)
                   loc_key = _location_key(title)
+                  if _SUPPRESSION_LOC_RE.search(finding.get("location", "")):
+                      print(f"  Skipped (suppression-file location): {title[:80]}")
+                      continue
                   suppressed_by_rule, rule_id = is_legal_suppressed(finding, legal_suppressions)
                   if suppressed_by_rule:
                       print(f"  Suppressed by rule {rule_id!r}: {title[:80]}")
