@@ -39,3 +39,76 @@ suppressions:
     file_pattern: ".*"
     finding_pattern: "suppression.{0,40}(bypass|self.auth|circular)|ai.self.authored"
     reason: "Suppressions are governed by PR review and the suppression-audit action; they are not self-authorised"
+
+  # ── Batch-triage 2026-07-11: recurring legal-ai commentary on INTERNAL prose ────────
+  # Settled once via the `/issues --batch` decision lane (Kevin, 2026-07-11). Each rule is
+  # scoped by file_pattern to a specific internal architecture/policy document so it CANNOT
+  # catch (a) customer-facing contracts, or (b) the PII-retention ADR `adrs/0006-...`, whose
+  # HIGH "purge not live in prod" findings (operations#97/#118) are deliberately kept OPEN
+  # and must still file. Per the conservative policy above, genuine customer-contract IP /
+  # retention items are NOT covered here — those stay filed and triaged.
+
+  - id: "three-axis-deployment-model-adr-0007-internal-prose"
+    file_pattern: "docs/decisions/0007-three-axis-deployment-model\\.md"
+    finding_pattern: "(ip ownership|royalty.?free|perpetual licen|self_operated|handover (runbook|path))"
+    reason: >
+      ADR 0007 is Rolliq's internal architecture-decision record for the three-axis deployment
+      model. The IP-ownership / royalty-free-licence framing and the self_operated handover note
+      describe the intended model; the binding legal instrument lives in the IP-ownership policy
+      and the per-client DPA, not the ADR. Internal-prose commentary, not a defect.
+
+  - id: "deployment-topology-adr-0005-internal-prose"
+    file_pattern: "docs/adr/0005-deployment-topology-and-operations\\.md"
+    finding_pattern: "(sole production customer|processor dpa requirement|rolliq_managed|named client)"
+    reason: >
+      ADR 0005 is Rolliq's internal deployment-topology record. The processor-DPA-per-topology
+      note is a design intent tracked in the DPA, not an unenforced control; any client name in
+      the ADR is separately governed by the confidential-terms CI guard (the real control), so
+      the legal-ai re-flag on the ADR text is noise. Internal-prose commentary, not a defect.
+
+  - id: "openai-account-module-internal-config-prose"
+    file_pattern: "modules/azure/openai-account/(main|variables)\\.tf"
+    finding_pattern: "(key vault secret.{0,40}(overwritten|overwrite)|no (data )?residency or retention controls|gpt-5.{0,40}(hardcoded|default))"
+    reason: >
+      The openai-account Terraform module is per-deployment (one Key Vault per client), so a
+      shared secret name is not overwritten across clients; residency/retention are enforced at
+      the storage/DB layer (australiaeast) not the model deployment; the gpt-5 default is a
+      module default overridden per-client in clients-config. Internal infra-config prose.
+
+  - id: "ip-ownership-policy-internal-prose"
+    file_pattern: "policies/ip-ownership-and-license\\.md"
+    finding_pattern: "(ai.?generated deliverable ip|perpetual licen|licensing field)"
+    reason: >
+      Rolliq's own IP-ownership-and-license policy document. Enforceability questions on Rolliq's
+      internal vesting/licence prose are a policy-maturity discussion, not a code/compliance
+      defect; per-client commercial terms are held in clients-config, not this policy. NOTE:
+      customer-contract IP clauses (klsjapan/legal, cashbucket/legal reseller agreement) are NOT
+      covered by this rule and stay filed.
+
+  - id: "clients-config-self-attested-fields-internal-schema"
+    file_pattern: "(schema/client\\.schema\\.json|clients/sandbox\\.yaml)"
+    finding_pattern: "(self.?attest|optional and self.?attested|no external dpa counterparty|transcript delivery disclosed only)"
+    reason: >
+      clients-config self-attested fields (IP-licensing, transcript-delivery, DPA-attestation)
+      are the internal record of a per-client decision; the executed instrument is the signed
+      DPA held out-of-band, not the config field. Self-attestation is the intended model for
+      sandbox/internal environments. Internal-schema prose, not a defect.
+
+  - id: "retention-py-365-day-cap-by-design"
+    file_pattern: "src/storage/retention\\.py"
+    finding_pattern: "(365|retention (cap|window)).{0,60}(insufficient|legal.?hold|preservation)|audit log.{0,60}(client_id|data categories|no record of what)|wall.?clock.{0,40}last.?modified"
+    reason: >
+      The 365-day retention cap is the configured DEFAULT purge window, not a legal-hold ceiling;
+      legal-hold preservation is a separate, longer-lived control layered on top. The purge audit
+      log records client_id + counts by design (privacy-minimising: it does not log the deleted
+      PII values). Recurring by-design finding on retention.py; the live "purge not yet active in
+      prod" gap is tracked separately as operations#97/#118 (adrs/0006), which stay OPEN.
+
+  - id: "ci-subprocessor-disclosure-review-doc-internal"
+    file_pattern: "reviews/2026-06-ci-subprocessor-disclosure\\.md"
+    finding_pattern: "(no retention period specified.{0,40}developer pii|openai added as vendor|zero.?retention terms)"
+    reason: >
+      This is an internal CI-subprocessor-disclosure REVIEW note (the audit record of the
+      disclosure decision itself), not a live control. Developer-PII-in-CI retention for the
+      Anthropic/OpenAI CI reviewers is a disclosed, accepted sub-processor decision recorded in
+      the sub-processor register. Commentary on the review doc, not a defect.
