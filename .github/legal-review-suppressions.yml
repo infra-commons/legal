@@ -40,6 +40,18 @@ suppressions:
     finding_pattern: "suppression.{0,40}(bypass|self.auth|circular)|ai.self.authored"
     reason: "Suppressions are governed by PR review and the suppression-audit action; they are not self-authorised"
 
+  - id: "adr-0006-retention-decision-record-accepted-risk-prose"
+    file_pattern: "adrs/0006-pii-retention-window-and-purge\\.md"
+    finding_pattern: "(legal.?hold.{0,80}(unaudited|audit trail|direct.{0,20}database)|cross.?border disclosure review|Log Analytics scope unresolved|audit log not independent|integrity risk accepted|collection notice|IPP ?[0-9]|APP ?[0-9])"
+    reason: >
+      ADR-0006's accepted-risk and future-dated-review prose: legal-hold-set-via-DB-audit
+      (operations#122), cross-border disclosure review target 2026-10-03 (#123), Log Analytics
+      purge scope (#124), audit-log-operator-independence IPP9/APP11 (#125), collection-notice
+      IPP3/APP5 (#126). All dispositioned wont-fix in the 2026-07-12 batch as legal-ai commentary
+      on a decision record's self-documented commitments. SCOPED to those five themes ONLY — it
+      does NOT match the "purge not yet active in prod" gate findings (operations#97/#118), which
+      stay OPEN and must keep filing per the carve-out note below. CRITICAL still surfaces.
+
   # ── Batch-triage 2026-07-11: recurring legal-ai commentary on INTERNAL prose ────────
   # Settled once via the `/issues --batch` decision lane (Kevin, 2026-07-11). Each rule is
   # scoped by file_pattern to a specific internal architecture/policy document so it CANNOT
