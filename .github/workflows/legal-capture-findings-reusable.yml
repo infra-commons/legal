@@ -1,7 +1,9 @@
 name: Capture legal findings (reusable)
 
 # Reusable post-merge legal findings capture. Reviews the merged diff and files
-# ALL findings (CRITICAL/HIGH/MEDIUM/LOW) as tracked GitHub Issues.
+# CRITICAL/HIGH findings as tracked GitHub Issues. MEDIUM/LOW findings are
+# advisory-only: logged in the workflow run but not filed as individual issues,
+# to stop per-finding issue flooding without losing any critical/high finding.
 #
 # Caller pattern (trigger on push to main):
 #
@@ -593,14 +595,23 @@ jobs:
               legal_suppressions = load_legal_suppressions()
 
               _VALID_SEVERITIES = {"CRITICAL", "HIGH", "MEDIUM", "LOW"}
+              # Only CRITICAL/HIGH get individual tracked issues. MEDIUM/LOW are
+              # advisory-only (logged in the run, not filed) to stop per-finding
+              # issue flooding while never dropping a real critical/high finding.
+              _INDIVIDUAL_ISSUE_SEVERITIES = {"CRITICAL", "HIGH"}
 
               created = 0
+              advisory_skipped = 0
               criticals_new = 0
               criticals_already_tracked = 0
               for finding in findings:
                   raw_sev = str(finding.get("severity", "")).upper()
                   sev = raw_sev if raw_sev in _VALID_SEVERITIES else "LOW"
                   title = issue_title(finding)
+                  if sev not in _INDIVIDUAL_ISSUE_SEVERITIES:
+                      advisory_skipped += 1
+                      print(f"  Advisory only ({sev}, not filed as issue): {title[:80]}")
+                      continue
                   loc_key = _location_key(title)
                   if _SUPPRESSION_LOC_RE.search(finding.get("location", "")):
                       print(f"  Skipped (suppression-file location): {title[:80]}")
@@ -635,6 +646,7 @@ jobs:
               criticals_total = criticals_new + criticals_already_tracked
               print(
                   f"Done. Captured {created} new finding(s). "
+                  f"{advisory_skipped} MEDIUM/LOW advisory finding(s) logged, not filed. "
                   f"CRITICALs: {criticals_new} new, {criticals_already_tracked} already tracked."
               )
               if criticals_total:
