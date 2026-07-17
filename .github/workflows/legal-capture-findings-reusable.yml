@@ -192,6 +192,18 @@ jobs:
           company's own marketing materials. Their information is published with consent
           as part of a commercial relationship.
 
+          Documentation that DESCRIBES a planned, tracked, or deploy-time-enforced control
+          is not itself a legal defect. When the changed file is documentation (an ADR,
+          CHANGELOG, README, runbook, schema description, or PR template) describing a
+          compliance posture, do not report a finding whose substance is that the described
+          control is "not yet verified", "enforced at deploy time rather than in code",
+          "documented but not contractually binding", "lacks a named verification
+          mechanism", or "not yet executed with a customer". Those are roadmap and tracking
+          observations, not legal risks introduced by the diff. Still flag, in documentation
+          as in code: real personal information (a real individual's name or contact
+          details), a genuine new liability, IP, or consent change in operative text, or a
+          factual legal misstatement.
+
           Return ONLY a JSON object -- no prose, no markdown fences. Use this exact schema:
           {
             "findings": [
