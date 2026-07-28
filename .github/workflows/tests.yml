@@ -1,0 +1,43 @@
+name: Tests
+
+# Runs the unit tests for the reusable workflows in this repo.
+#
+# This matters more here than in an ordinary repo: `legal-review-reusable.yml` is
+# consumed by 17 callers across four orgs, and `legal-review / gate` is a REQUIRED
+# check on some of them. Once callers track the moving `legal-review/v1` tag, a
+# regression here reaches them as soon as the tag advances, with no per-caller pin
+# bump to review it first. These tests are the only automated check in between.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  legal-review:
+    name: legal-review unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        # Mirrors the versions the reusable itself installs, so the tests exercise
+        # the same SDK surface that runs in production. The tests exec the reviewer
+        # straight out of the workflow heredoc, so its imports must resolve here.
+        # `hypothesis` and `pytest` are test-only.
+        run: pip install pytest==8.3.4 hypothesis==6.161.8 anthropic==0.49.0 httpx==0.28.1 pyyaml==6.0.2
+
+      - name: Run tests
+        # The `ci` hypothesis profile is derandomised (see tests/conftest.py): a
+        # property test must never fail a PR that an identical rerun would pass.
+        env:
+          HYPOTHESIS_PROFILE: ci
+        run: python -m pytest tests -q

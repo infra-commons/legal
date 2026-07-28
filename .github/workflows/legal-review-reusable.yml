@@ -100,6 +100,24 @@ jobs:
           MAX_SUPPRESSIONS_BYTES = 128_000
           _HINT_SAFE_RE = re.compile(r"[^a-zA-Z0-9 ]")
 
+          # Path tokens that mark a changed file as a legally-relevant surface. A PR
+          # touching none of these is skipped without an API call.
+          #
+          # Deliberately OVER-BROAD and matched as a plain substring ANYWHERE in the
+          # path (never anchored): the failure we must avoid is skipping a PR that did
+          # carry legal surface, so every ambiguous case resolves toward reviewing.
+          # Short tokens that appear inside unrelated English words are excluded on
+          # purpose -- "sla" (translate), "nda" (standard), "tos" (photos) and "appi"
+          # (mapping) would match almost everything and make the filter meaningless.
+          LEGAL_SURFACE_TOKENS = (
+              "legal", "licen", "policy", "policies", "privacy", "terms", "gdpr",
+              "consent", "cookie", "retention", "disclaimer", "copyright",
+              "trademark", "compliance", "contract", "agreement", "subprocessor",
+              "sub-processor", "personal-data", "personal_data", "pii", "dpa",
+              "eula", "schema", "migration", "content", "article", "blog",
+              "marketing",
+          )
+
           # Context files read (if present) to give the reviewer repo intent.
           CONTEXT_FILES = ("AGENTS.md", "README.md", "SOLUTION.yaml")
 
@@ -247,6 +265,47 @@ jobs:
                       " -- review remaining changes manually...]"
                   )
               return diff
+
+
+          def get_changed_files(base_sha: str, head_sha: str) -> list[str]:
+              """Changed paths for the PR.
+
+              Deliberately a SEPARATE `--name-only` diff rather than parsing the diff
+              from get_diff(): that one is truncated at MAX_DIFF_CHARS, so on a large
+              PR the file that made the change legally relevant could fall off the end
+              and the review would be skipped. This list must never be truncated.
+              """
+              if not _SHA_RE.fullmatch(base_sha) or not _SHA_RE.fullmatch(head_sha):
+                  raise ValueError(f"Invalid SHA: base={base_sha!r} head={head_sha!r}")
+              result = subprocess.run(
+                  ["git", "diff", "--name-only", f"{base_sha}...{head_sha}"],
+                  capture_output=True,
+                  encoding="utf-8",
+                  errors="replace",
+                  check=True,
+              )
+              return [ln for ln in result.stdout.splitlines() if ln.strip()]
+
+
+          def touches_legal_surface(paths: list[str]) -> bool:
+              """True if any changed path looks legally relevant.
+
+              Fail-closed: an empty or all-blank path list means "we could not tell
+              what changed", which returns True (review anyway). Blanks are stripped
+              first so [""] cannot behave as a third state distinct from [].
+
+              Over non-empty input this is monotone under union -- adding files can
+              only turn skip into review, never the reverse -- so pushing another
+              commit to a PR can never drop it out of legal review.
+              """
+              real = [p for p in paths if p.strip()]
+              if not real:
+                  return True
+              return any(
+                  token in path.lower()
+                  for path in real
+                  for token in LEGAL_SURFACE_TOKENS
+              )
 
 
           def get_repo_context() -> str:
@@ -468,6 +527,23 @@ jobs:
               diff = get_diff(base_sha, head_sha)
               if not diff.strip():
                   print("Empty diff -- nothing to review.")
+                  set_github_output("has_critical", "false")
+                  return
+
+              # Path filter. Skip the (expensive) review entirely when the PR touches no
+              # legally-relevant surface. The job still SUCCEEDS and still reports
+              # has_critical=false, so the `gate` job passes -- this must never look like
+              # a skipped job, which the gate treats as a blocking failure.
+              try:
+                  changed = get_changed_files(base_sha, head_sha)
+              except Exception as exc:  # noqa: BLE001 -- fail-closed, review anyway
+                  print(f"Could not list changed files ({exc}) -- reviewing anyway.", file=sys.stderr)
+                  changed = []
+              if not touches_legal_surface(changed):
+                  print(
+                      f"No legal surface in {len(changed)} changed file(s) "
+                      "-- skipping legal review."
+                  )
                   set_github_output("has_critical", "false")
                   return
 
