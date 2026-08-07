@@ -7,6 +7,12 @@ name: Tests
 # check on some of them. Once callers track the moving `legal-review/v1` tag, a
 # regression here reaches them as soon as the tag advances, with no per-caller pin
 # bump to review it first. These tests are the only automated check in between.
+#
+# Covers BOTH reusables. `legal-capture-findings-reusable.yml` had no coverage at
+# all until infra-commons/legal#18 — where its suppression matcher was found
+# treating a pattern-less entry as a wildcard, silently dropping HIGH findings.
+# The tests exec each reusable straight out of its shipped heredoc, so they can
+# only pass against the code the fleet actually runs.
 
 on:
   pull_request:
