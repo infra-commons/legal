@@ -579,6 +579,36 @@ jobs:
               return False
 
 
+          NEVER_SUPPRESSIBLE_SEVERITIES = {"CRITICAL"}
+
+
+          def suppression_is_usable(sup: dict) -> bool:
+              """False for an entry that constrains nothing, i.e. a wildcard nobody wrote.
+
+              An ABSENT pattern reads naturally as "no constraint on this field", which is
+              correct when the other field is present and catastrophic when neither is: the
+              entry then matches every finding, at every severity, in every file. That is
+              not a hypothetical. `cashbucket-com/marketing`'s suppressions file was written
+              in its local reviewer's substring schema, carried neither key here, and
+              silently dropped three HIGH findings — one of them plaintext PII — between
+              2026-07-17 and 2026-07-30, under a rule scoped to cloud account IDs.
+
+              Treated as invalid and skipped with a warning, never as a match. The warning
+              matters as much as the skip: a suppressions file that has drifted schema is
+              otherwise indistinguishable from one that is working.
+              """
+              if sup.get("file_pattern") or sup.get("finding_pattern"):
+                  return True
+              print(
+                  f"Warning: legal suppression {sup.get('id', 'unknown')!r} has neither "
+                  f"file_pattern nor finding_pattern — skipping it. An entry with no pattern "
+                  f"matches every finding at every severity; that is never what was intended. "
+                  f"Check this file against the canonical schema.",
+                  file=sys.stderr,
+              )
+              return False
+
+
           def is_legal_suppressed(finding: dict, suppressions: list[dict]) -> tuple[bool, str | None]:
               """Return (True, rule_id) if this finding matches a suppression rule.
 
