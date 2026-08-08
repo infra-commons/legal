@@ -484,6 +484,11 @@ jobs:
                   return ""
               hints = []
               for s in suppressions[:100]:
+                  # Skip entries constraining nothing, so this half and the capture half
+                  # agree about which entries are real. An unusable entry contributing a
+                  # prompt hint would suppress by suggestion what it cannot suppress by rule.
+                  if not (s.get("file_pattern") or s.get("finding_pattern")):
+                      continue
                   label = _HINT_SAFE_RE.sub("", str(s.get("id", "")).replace("-", " ")).strip()
                   if label:
                       hints.append(f"- {label}")
@@ -493,6 +498,9 @@ jobs:
                   "\n\nThe following finding categories have been reviewed for this portfolio "
                   "and accepted as false positives or by-design. Do not surface them unless "
                   "you have specific new evidence:\n\n" + "\n".join(hints)
+                  + "\n\nThis acceptance NEVER applies to CRITICAL findings. If a finding is "
+                  "CRITICAL, report it even when it falls squarely inside one of the accepted "
+                  "categories above. The suppression list caps at HIGH by design."
               )
 
 

@@ -25,13 +25,20 @@ settings.load_profile(os.environ.get("HYPOTHESIS_PROFILE", "dev"))
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "legal-review-reusable.yml"
+CAPTURE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "legal-capture-findings-reusable.yml"
 
 _BEGIN = "python3 << 'PYEOF'"
 _END = "PYEOF"
 
 
 def extract_reviewer_source(workflow_path: Path = WORKFLOW) -> str:
-    """Return the dedented Python source of the embedded reviewer."""
+    """Return the dedented Python source of a workflow's embedded heredoc.
+
+    Parameterised over the workflow so the capture reusable can be loaded the
+    same way. The "exactly one heredoc" assertion below is per-file and still
+    holds for both: it is what stops this silently extracting the wrong block if
+    a second heredoc is ever added.
+    """
     lines = workflow_path.read_text(encoding="utf-8").splitlines()
 
     begins = [i for i, ln in enumerate(lines) if ln.strip() == _BEGIN]
@@ -52,12 +59,29 @@ def extract_reviewer_source(workflow_path: Path = WORKFLOW) -> str:
     return body
 
 
+def _exec_workflow_module(workflow_path: Path, name: str):
+    """Exec a workflow's embedded heredoc as a module, from the shipped YAML."""
+    src = extract_reviewer_source(workflow_path)
+    mod = types.ModuleType(name)
+    mod.__dict__["__name__"] = name  # keep main() from running
+    sys.modules[name] = mod
+    exec(compile(src, str(workflow_path), "exec"), mod.__dict__)
+    return mod
+
+
 @pytest.fixture(scope="session")
 def reviewer():
     """The reviewer module, exec'd from the workflow heredoc."""
-    src = extract_reviewer_source()
-    mod = types.ModuleType("legal_reviewer_shipped")
-    mod.__dict__["__name__"] = "legal_reviewer_shipped"  # keep main() from running
-    sys.modules["legal_reviewer_shipped"] = mod
-    exec(compile(src, str(WORKFLOW), "exec"), mod.__dict__)
-    return mod
+    return _exec_workflow_module(WORKFLOW, "legal_reviewer_shipped")
+
+
+@pytest.fixture(scope="session")
+def capture():
+    """The post-merge capture module, exec'd from ITS workflow heredoc.
+
+    Added because the suppression matcher — the one that decides whether a
+    finding is filed at all — lives here, not in the reviewer, and was therefore
+    outside every test in this repo. A wildcard suppression bug sat in it
+    unnoticed while the reviewer beside it was well covered.
+    """
+    return _exec_workflow_module(CAPTURE_WORKFLOW, "legal_capture_shipped")
