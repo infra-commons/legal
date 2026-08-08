@@ -474,6 +474,60 @@ jobs:
                   return []
 
 
+          def drop_expired(entries: list[dict]) -> list[dict]:
+              """Drop suppressions whose `expires` date has passed.
+
+              Neither legal path honoured this field, so a legal suppression was permanent
+              by construction: an entry written as a 90-day accepted risk stayed in force
+              forever, and nothing anywhere said so. `infra-commons/security`'s
+              adversarial-review.py has dropped expired entries at load since it was
+              written; this ports the same semantics, including the awkward one —
+
+                an UNPARSEABLE date is treated as NO expiry, with a warning.
+
+              That is deliberate and is the safe direction here. Treating a typo'd date as
+              "expired" would silently un-suppress a finding the reviewer accepted, which
+              looks like a new finding appearing from nowhere; treating it as "no expiry"
+              keeps today's behaviour and says so loudly enough to be fixed.
+              """
+              from datetime import date
+
+              today = date.today()
+              active: list[dict] = []
+              for entry in entries:
+                  raw_expires = entry.get("expires", "")
+                  if not raw_expires:
+                      active.append(entry)
+                      continue
+                  try:
+                      expires = date.fromisoformat(str(raw_expires).strip())
+                  except (ValueError, TypeError):
+                      print(
+                          f"Warning: legal suppression {entry.get('id', 'unknown')!r} has an "
+                          f"unparseable expires value {raw_expires!r} — treated as no expiry",
+                          file=sys.stderr,
+                      )
+                      active.append(entry)
+                      continue
+                  days_left = (expires - today).days
+                  if days_left < 0:
+                      print(
+                          f"Warning: legal suppression {entry.get('id', 'unknown')!r} expired "
+                          f"{expires} ({-days_left} days ago) — skipping; the finding will "
+                          f"surface again",
+                          file=sys.stderr,
+                      )
+                      continue
+                  if days_left <= 30:
+                      print(
+                          f"Warning: legal suppression {entry.get('id', 'unknown')!r} expires in "
+                          f"{days_left} days ({expires}) — renew or remove before it lapses",
+                          file=sys.stderr,
+                      )
+                  active.append(entry)
+              return active
+
+
           def load_legal_suppressions() -> list[dict]:
               """Canonical platform suppressions (public infra-commons/security file) merged with
               the optional per-repo .github/legal-review-suppressions.yml from the calling repo.
@@ -492,7 +546,37 @@ jobs:
                   print(f"  Loaded {len(canonical)} canonical legal suppression(s)")
               except Exception as exc:
                   print(f"Warning: could not load canonical legal suppressions: {exc}", file=sys.stderr)
-              return canonical + _load_repo_local_suppressions()
+              return drop_expired(canonical + _load_repo_local_suppressions())
+
+
+          NEVER_SUPPRESSIBLE_SEVERITIES = {"CRITICAL"}
+
+
+          def suppression_is_usable(sup: dict) -> bool:
+              """False for an entry that constrains nothing, i.e. a wildcard nobody wrote.
+
+              An ABSENT pattern reads naturally as "no constraint on this field", which is
+              correct when the other field is present and catastrophic when neither is: the
+              entry then matches every finding, at every severity, in every file. That is
+              not a hypothetical. `cashbucket-com/marketing`'s suppressions file was written
+              in its local reviewer's substring schema, carried neither key here, and
+              silently dropped three HIGH findings — one of them plaintext PII — between
+              2026-07-17 and 2026-07-30, under a rule scoped to cloud account IDs.
+
+              Treated as invalid and skipped with a warning, never as a match. The warning
+              matters as much as the skip: a suppressions file that has drifted schema is
+              otherwise indistinguishable from one that is working.
+              """
+              if sup.get("file_pattern") or sup.get("finding_pattern"):
+                  return True
+              print(
+                  f"Warning: legal suppression {sup.get('id', 'unknown')!r} has neither "
+                  f"file_pattern nor finding_pattern — skipping it. An entry with no pattern "
+                  f"matches every finding at every severity; that is never what was intended. "
+                  f"Check this file against the canonical schema.",
+                  file=sys.stderr,
+              )
+              return False
 
 
           NEVER_SUPPRESSIBLE_SEVERITIES = {"CRITICAL"}

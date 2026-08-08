@@ -445,6 +445,111 @@ jobs:
                   return []
 
 
+          _SHA_RE = re.compile(r"^[0-9a-f]{7,40}$")
+
+
+          def _read_local_suppressions_from_base() -> list[dict]:
+              """Read the repo-local suppressions file from the PR's BASE commit.
+
+              Previously this read the file from the checked-out working tree, which on a
+              `pull_request` run is the PR's own head. A PR could therefore add a
+              suppression entry and have it take effect ON THAT SAME PR — the change under
+              review deciding what the review is allowed to say about it. The canonical
+              half was never exposed to this (it is fetched at `ref=main`); only the
+              repo-local half was.
+
+              `infra-commons/security`'s adversarial-review.py reads from the base branch
+              for exactly this reason. This pins to `BASE_SHA` — the PR's actual base
+              commit, which the workflow already passes in — rather than to a branch name,
+              so it cannot drift if the base moves mid-run.
+
+              Fails to [] on every error. An unreadable suppressions file must mean "no
+              suppressions" (review everything) and never "suppress everything".
+              """
+              base_sha = os.environ.get("BASE_SHA", "").strip()
+              if not _SHA_RE.match(base_sha):
+                  print(
+                      f"Warning: BASE_SHA {base_sha!r} is not a commit sha — skipping repo-local "
+                      f"suppressions rather than falling back to the PR working tree",
+                      file=sys.stderr,
+                  )
+                  return []
+              try:
+                  result = subprocess.run(
+                      ["git", "show", f"{base_sha}:{CANONICAL_SUPPRESSIONS_PATH}"],
+                      capture_output=True, text=True, timeout=30,
+                  )
+              except Exception as exc:
+                  print(f"Warning: could not read base-branch suppressions: {exc}", file=sys.stderr)
+                  return []
+              if result.returncode != 0:
+                  return []  # absent on the base branch — no repo-local suppressions
+              if len(result.stdout) > MAX_SUPPRESSIONS_BYTES:
+                  print("Warning: repo-local suppressions file too large — ignoring", file=sys.stderr)
+                  return []
+              try:
+                  data = yaml.safe_load(result.stdout)
+              except Exception as exc:
+                  print(f"Warning: could not parse local suppressions: {exc}", file=sys.stderr)
+                  return []
+              entries = (data or {}).get("suppressions", []) if isinstance(data, dict) else []
+              return [s for s in entries if isinstance(s, dict)]
+
+
+          def drop_expired(entries: list[dict]) -> list[dict]:
+              """Drop suppressions whose `expires` date has passed.
+
+              Neither legal path honoured this field, so a legal suppression was permanent
+              by construction: an entry written as a 90-day accepted risk stayed in force
+              forever, and nothing anywhere said so. `infra-commons/security`'s
+              adversarial-review.py has dropped expired entries at load since it was
+              written; this ports the same semantics, including the awkward one —
+
+                an UNPARSEABLE date is treated as NO expiry, with a warning.
+
+              That is deliberate and is the safe direction here. Treating a typo'd date as
+              "expired" would silently un-suppress a finding the reviewer accepted, which
+              looks like a new finding appearing from nowhere; treating it as "no expiry"
+              keeps today's behaviour and says so loudly enough to be fixed.
+              """
+              from datetime import date
+
+              today = date.today()
+              active: list[dict] = []
+              for entry in entries:
+                  raw_expires = entry.get("expires", "")
+                  if not raw_expires:
+                      active.append(entry)
+                      continue
+                  try:
+                      expires = date.fromisoformat(str(raw_expires).strip())
+                  except (ValueError, TypeError):
+                      print(
+                          f"Warning: legal suppression {entry.get('id', 'unknown')!r} has an "
+                          f"unparseable expires value {raw_expires!r} — treated as no expiry",
+                          file=sys.stderr,
+                      )
+                      active.append(entry)
+                      continue
+                  days_left = (expires - today).days
+                  if days_left < 0:
+                      print(
+                          f"Warning: legal suppression {entry.get('id', 'unknown')!r} expired "
+                          f"{expires} ({-days_left} days ago) — skipping; the finding will "
+                          f"surface again",
+                          file=sys.stderr,
+                      )
+                      continue
+                  if days_left <= 30:
+                      print(
+                          f"Warning: legal suppression {entry.get('id', 'unknown')!r} expires in "
+                          f"{days_left} days ({expires}) — renew or remove before it lapses",
+                          file=sys.stderr,
+                      )
+                  active.append(entry)
+              return active
+
+
           def load_suppressions(token: str, calling_repo: str) -> list[dict]:
               """Load and merge canonical + repo-local legal-review suppressions.
 
@@ -452,18 +557,9 @@ jobs:
               Repo-local entries allow entity repos to add their own by-design suppressions.
               """
               canonical = _fetch_suppressions_via_api(token, CANONICAL_SUPPRESSIONS_REPO, CANONICAL_SUPPRESSIONS_PATH)
-              from pathlib import Path
-              local_path = Path(CANONICAL_SUPPRESSIONS_PATH)
               local_raw: list[dict] = []
-              if local_path.is_file() and calling_repo != CANONICAL_SUPPRESSIONS_REPO:
-                  try:
-                      raw = local_path.read_text(encoding="utf-8")
-                      if len(raw) <= MAX_SUPPRESSIONS_BYTES:
-                          data = yaml.safe_load(raw)
-                          local_raw = (data or {}).get("suppressions", []) if isinstance(data, dict) else []
-                          local_raw = [s for s in local_raw if isinstance(s, dict)]
-                  except Exception as exc:
-                      print(f"Warning: could not parse local suppressions: {exc}", file=sys.stderr)
+              if calling_repo != CANONICAL_SUPPRESSIONS_REPO:
+                  local_raw = _read_local_suppressions_from_base()
 
               # Canonical wins on id collision.
               by_id: dict[str, dict] = {}
@@ -475,7 +571,7 @@ jobs:
                   eid = entry.get("id") if isinstance(entry, dict) else None
                   if isinstance(eid, str) and eid:
                       by_id[eid] = entry
-              return list(by_id.values())
+              return drop_expired(list(by_id.values()))
 
 
           def build_suppression_context(suppressions: list[dict]) -> str:
