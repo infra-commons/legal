@@ -104,7 +104,7 @@ jobs:
 
           GITHUB_API = "https://api.github.com"
           LEGAL_SUPPRESSIONS_URL = (
-              "https://raw.githubusercontent.com/infra-commons/security/main"
+              "https://raw.githubusercontent.com/infra-commons/legal/main"
               "/.github/legal-review-suppressions.yml"
           )
           # Per-repo suppressions: an optional `.github/legal-review-suppressions.yml` in the
@@ -529,8 +529,9 @@ jobs:
 
 
           def load_legal_suppressions() -> list[dict]:
-              """Canonical platform suppressions (public infra-commons/security file) merged with
-              the optional per-repo .github/legal-review-suppressions.yml from the calling repo.
+              """Canonical platform suppressions (this repo's own public file, also read by
+              legal-review-reusable.yml) merged with the optional per-repo
+              .github/legal-review-suppressions.yml from the calling repo.
 
               A finding is suppressed if it matches ANY rule (union), so plain concatenation is
               correct. Either source failing degrades to the other rather than hard-failing, so
