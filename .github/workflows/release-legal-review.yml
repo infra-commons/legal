@@ -1,0 +1,160 @@
+name: Release legal reusables
+
+# Moves each legal reusable workflow's moving `<family>/v1` tag to `main` once `Tests`
+# passes, and then asserts the tag actually landed. Adapted from
+# infra-commons/security/.github/workflows/release-composites.yml, whose mechanism shape
+# (tests-gated, content-hash comparison, immutable-tag-then-moving-tag, a separate verify
+# job, a human-approval environment) transfers directly — but its identity does not.
+#
+# Why this runs as the `infra-commons-bot` App and not `GITHUB_TOKEN`
+# ---------------------------------------------------------------------
+# `infra-commons/security` runs its release as `GITHUB_TOKEN` because it is a public repo
+# that cannot safely hold an App key, and because GitHub Actions cannot itself be granted a
+# ruleset bypass — so its `protect-moving-tags` keeps only a `deletion` rule and permits the
+# `update` a `GITHUB_TOKEN` push needs.
+#
+# `infra-commons/legal` is also public, but its two tag rulesets are shaped differently
+# (read live, not assumed — see infra-commons/legal#25's correcting comment, re-confirmed by
+# reviews/2026-08-legal-delivery-contract.md and independently re-verified against the API
+# when this workflow was built):
+#
+#   - `protect-immutable-tags` (19945085): `include: ~ALL`, `exclude: refs/tags/*/v1`,
+#     no bypass actor. It does not cover `*/v1` at all.
+#   - `protect-moving-tags` (19945087): `include: refs/tags/*/v1` only, rules `update` +
+#     `deletion` + `non_fast_forward`, bypass actor Integration `4025350`
+#     (`infra-commons-bot`) only. A human — including an org owner — cannot move this tag;
+#     `current_user_can_bypass` reads `never` for everyone but the App.
+#
+# `update` being restricted here (unlike security) means the `GITHUB_TOKEN` design would not
+# work: only an App-authenticated push can move `legal-review/v1` at all. This was proven
+# live against a disposable `zz-probe/v1` tag before this workflow shipped, not assumed.
+#
+# Why the `legal-release` environment gate exists even though the App bypass is airtight
+# -----------------------------------------------------------------------------------------
+# The ruleset makes the App the only thing that CAN move the tag; it says nothing about
+# WHEN it should. `legal-review / gate` is a required check on multiple caller repos with no
+# per-caller pin review once they track the tag — `Tests` passing is a statement about this
+# repo, not a decision to ship to the fleet. The `legal-release` environment (required
+# reviewer, mirrors `infra-commons/security`'s `fleet-release`) is the one deliberate act
+# left on this path; it must exist with its `required_reviewers` rule BEFORE this file
+# merges, or GitHub auto-creates it unprotected the first time it's referenced.
+#
+# The org secret grant is a deliberate, separate, operator-executed step
+# --------------------------------------------------------------------------
+# The App's private key lives in the org secret `INFRA_COMMONS_BOT_PRIVATE_KEY`, whose
+# selected-repos list does not yet include `infra-commons/legal` as of this workflow
+# shipping. That is intentional, not an oversight: this fleet has always treated widening
+# that secret's reach to another public repo as deliberate, operator-level credential work
+# (a prior over-grant to two public repos was corrected as a real incident). This workflow
+# ships correctly wired and inert — its first real run will fail cleanly at the token-mint
+# step until the operator grants that access on their own schedule. Do not "fix" that by
+# switching this back to `GITHUB_TOKEN`; the ruleset does not permit it.
+#
+# Concurrency is scoped to the `release` job only, never the workflow
+# -------------------------------------------------------------------
+# infra-commons/security#68: a workflow-level concurrency group covered its `verify`
+# heartbeat too, and `cancel-in-progress: false` queues rather than cancels — so each
+# scheduled heartbeat became the queued run the next arrival cancelled, silencing the one
+# check that reports releases aren't happening. Scoping the group to `release` avoids that
+# from the start.
+
+on:
+  workflow_run:
+    workflows: ["Tests"]
+    types: [completed]
+    branches: [main]
+  schedule:
+    # A heartbeat: the release path is a chain (Tests must run, succeed, and fire
+    # workflow_run). If any link breaks, the release silently stops happening and every
+    # symptom is the same silence this workflow exists to end.
+    - cron: "41 20 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Move moving tags to main
+    concurrency:
+      group: release-legal-review
+      cancel-in-progress: false
+    if: >-
+      ${{ github.event_name == 'workflow_run'
+          && github.event.workflow_run.conclusion == 'success'
+          && github.event.workflow_run.event == 'push' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: legal-release
+    permissions:
+      contents: read
+    steps:
+      - name: Mint an installation token as infra-commons-bot
+        # Scoped to exactly this repo and exactly the permission needed to push a tag —
+        # least privilege for a token this workflow logs the mint of. `client-id` is a
+        # public App identifier, not a secret; `private-key` is.
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: app-token
+        with:
+          client-id: Iv23liH9thgSIViTxbMV # gitleaks:allow
+          private-key: ${{ secrets.INFRA_COMMONS_BOT_PRIVATE_KEY }}
+          owner: infra-commons
+          repositories: legal
+          permission-contents: write
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          # Minted as the App so every git push below (tag create + moving-tag force-push)
+          # is authenticated as the App, which is the only identity the ruleset lets move
+          # `legal-review/v1`.
+          token: ${{ steps.app-token.outputs.token }}
+          fetch-depth: 0
+          fetch-tags: true
+          # Pin to the exact commit Tests passed on, not to whatever `main` points at now.
+          # Without this a push landing mid-run would be released on the strength of the
+          # previous commit's tests.
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: "3.12"
+
+      - name: Release any legal reusable whose moving tag is behind
+        run: python .github/scripts/release_legal_reusables.py
+
+      - name: Verify every moving tag now matches the released code
+        # Separate from the step above on purpose. The release step reporting success is
+        # the release mechanism vouching for itself; this re-reads the tags from the remote
+        # and compares content.
+        run: python .github/scripts/check_legal_reusable_tags_released.py
+
+  verify:
+    name: Every moving tag matches main
+    if: ${{ github.event_name != 'workflow_run' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read # for the stuck-approval check below
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          ref: main
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: "3.12"
+
+      - name: Check every legal reusable's moving tag is released
+        run: python .github/scripts/check_legal_reusable_tags_released.py
+
+      - name: Check no release is stuck awaiting approval
+        # `if: always()` because a stale tag and a stuck approval are usually the same
+        # incident, and the stuck approval is the explanation — skipping this when the step
+        # above fails would withhold the diagnosis exactly when it's needed.
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python .github/scripts/check_legal_release_not_stuck.py
