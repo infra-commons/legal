@@ -349,6 +349,17 @@ jobs:
                           system=system_prompt,
                           messages=[{"role": "user", "content": user_content}],
                       )
+                      if msg.stop_reason == "max_tokens":
+                          # Same truncation-guard gap as legal-review-reusable.yml and
+                          # legal-capture-findings-reusable.yml: an unbalanced truncated
+                          # JSON response fails to parse and reads as "0 findings" for
+                          # this batch. Raise explicitly so the log says why, instead of
+                          # relying on the incidental JSON-parse-error message below.
+                          raise RuntimeError(
+                              f"response truncated at max_tokens "
+                              f"({msg.usage.output_tokens} output tokens) -- skipping "
+                              "this batch rather than parsing a partial response"
+                          )
                       findings = parse_findings(msg.content[0].text)
                       print(f"  Found {len(findings)} finding(s).")
                       all_findings.extend(findings)

@@ -26,6 +26,7 @@ settings.load_profile(os.environ.get("HYPOTHESIS_PROFILE", "dev"))
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "legal-review-reusable.yml"
 CAPTURE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "legal-capture-findings-reusable.yml"
+SCAN_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "legal-codebase-scan-reusable.yml"
 
 _BEGIN = "python3 << 'PYEOF'"
 _END = "PYEOF"
@@ -85,3 +86,9 @@ def capture():
     unnoticed while the reviewer beside it was well covered.
     """
     return _exec_workflow_module(CAPTURE_WORKFLOW, "legal_capture_shipped")
+
+
+@pytest.fixture(scope="session")
+def scan():
+    """The retrospective codebase-scan module, exec'd from ITS workflow heredoc."""
+    return _exec_workflow_module(SCAN_WORKFLOW, "legal_scan_shipped")

@@ -351,6 +351,20 @@ jobs:
                   }],
                   messages=[{"role": "user", "content": _build_user_content(diff, context)}],
               )
+              if message.stop_reason == "max_tokens":
+                  # has_critical_findings() only needs ONE bullet under ### CRITICAL to
+                  # return True, so a response truncated mid-section after a finding was
+                  # already written is still caught -- but a response cut off before or
+                  # within an early part of the CRITICAL section reads as "no findings",
+                  # the same gap infra-commons/security#109 found in adversarial-review.py's
+                  # call_anthropic() (a missing truncation guard that let a truncated
+                  # response read as a clean review). Fail loud instead of letting a
+                  # partial response stand in for a complete legal review.
+                  raise RuntimeError(
+                      f"Anthropic response truncated at max_tokens "
+                      f"({message.usage.output_tokens} output tokens) -- cannot treat a "
+                      "partial legal review as complete."
+                  )
               return message.content[0].text
 
 

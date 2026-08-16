@@ -322,6 +322,22 @@ jobs:
                   system=system_prompt,
                   messages=[{"role": "user", "content": user}],
               )
+              if msg.stop_reason == "max_tokens":
+                  # parse_findings() locates the JSON object with str.find/rfind on
+                  # braces; a response truncated mid-finding leaves it unbalanced, so
+                  # json.loads() fails and EVERY finding in the batch -- including any
+                  # complete CRITICAL ones that came before the cut -- is silently
+                  # dropped as "0 findings". That is the same class of gap
+                  # infra-commons/security#109 found in adversarial-review.py's
+                  # call_anthropic() (a missing truncation guard letting a truncated
+                  # response read as clean). Fail loud instead: this workflow is the
+                  # post-merge safety net and a silent false-clean here is exactly the
+                  # failure mode it exists to catch.
+                  raise RuntimeError(
+                      f"Anthropic response truncated at max_tokens "
+                      f"({msg.usage.output_tokens} output tokens) -- cannot treat a "
+                      "partial findings capture as complete."
+                  )
               return msg.content[0].text
 
 
