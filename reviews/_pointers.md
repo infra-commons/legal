@@ -29,6 +29,12 @@ pass. Tier 2 control-plane repos are unstarted; meta#815 notes it is unverified 
 already covered by routine session activity or genuinely unreviewed.
 
 **Caution for the next reader:** `legal-review/v1`'s moving tag currently equals `main` at the SHA
-above, but this repo's release mechanism is inert (`INFRA_COMMONS_BOT_PRIVATE_KEY` not yet granted —
-see the findings doc). A "last-reviewed SHA" here being on `main` does **not** mean it has reached any
-caller repo; check whether the tag has actually moved past this SHA before assuming a fix shipped.
+above — the release mechanism is **live** (`INFRA_COMMONS_BOT_PRIVATE_KEY` was granted 2026-08-16;
+see the findings doc's "Release mechanism" section for how this was verified, and for the corrected
+blast-radius count). A "last-reviewed SHA" here being on `main` still does not by itself mean a fix
+has reached every caller: 12 of 17 `legal-review.yml` callers track the tag (reached on the next
+tag-advance, gated by the `legal-release` environment's required reviewer), 1
+(`chargingblindly-com/legal`) tracks `@main` directly (reached on merge to `main`, no approval gate),
+and 4 are SHA-pinned behind and reached only when that caller bumps its own pin.
+`legal-capture-findings` and `legal-codebase-scan` carry no moving tag at all and reach a caller only
+via that caller's own SHA-pin bump, regardless of this repo's release-mechanism status.

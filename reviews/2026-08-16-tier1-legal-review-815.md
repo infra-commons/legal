@@ -125,29 +125,63 @@ per-batch loop rather than in a standalone function, so it isn't unit-tested at 
 as the other two — noted as a real, if minor, coverage gap rather than glossed over. Full suite:
 86 → 95 passing, 0 failing.
 
-## Release mechanism — reaffirming, not re-deriving
+## Release mechanism — corrected: it is live, not inert
 
-`infra-commons/legal` has no working release path for `legal-review/v1` right now:
-`INFRA_COMMONS_BOT_PRIVATE_KEY` is not yet granted to this repo (deliberately, per
-`release-legal-review.yml`'s own header comment — a prior over-grant of that org secret to two public
-repos was corrected as a real incident, so widening its reach is treated as deliberate operator-level
-credential work, not something to default into). `check_legal_reusable_tags_released.py` exists
-specifically to make that staleness loud rather than silent once it starts.
+**This section originally said the release mechanism was inert and this PR's fix would reach no
+caller. That was true when written and is false now: `INFRA_COMMONS_BOT_PRIVATE_KEY` was granted to
+this repo shortly after, the release ran green, and `legal-review/v1` has already moved once
+(`8f2fb005` → `b752b17`, the commit this PR is based on). Corrected in place rather than left
+standing, since the original sentence is exactly the kind a reviewer trusts instead of
+re-deriving.**
 
-Verified live rather than assumed: as of this pass, `refs/tags/legal-review/v1` and `refs/heads/main`
-point at the identical commit (`b752b17`) — the tag is not currently stale, only because nothing has
-touched `legal-review-reusable.yml` since it was last (presumably manually) set. **The moment this
-PR's fix to `legal-review-reusable.yml` merges to `main`, that equality breaks, and nothing in this
-repo's current setup can re-establish it** — the release workflow's first real run fails cleanly at
-the App token-mint step until the operator grants the key. `legal-capture-findings-reusable.yml` and
-`legal-codebase-scan-reusable.yml` carry no moving tag at all (per `infra-commons/legal#23`'s
-delivery-contract decision, only `legal-review` is tag-released; the other reusables are SHA-pinned
-per caller and only move when each caller repo bumps its own pin).
+Verified independently, not taken on report:
 
-**This PR's fix does not reach any of the ~16 caller repos, including the two where `legal-review /
-gate` is a required check, until the tag is advanced — which is an operator-owned action, not
-attempted here.** No tag was moved, no release workflow was triggered, and none should be inferred
-from this PR merging to `infra-commons/legal`'s `main`.
+- `GET /repos/infra-commons/legal/actions/organization-secrets` now lists
+  `INFRA_COMMONS_BOT_PRIVATE_KEY`.
+- `refs/tags/legal-review/v1` = `refs/heads/main` = `b752b17`, confirmed live via `git ls-remote`.
+- The run history (`gh run list --workflow=release-legal-review.yml`) shows a successful
+  `workflow_run`-triggered release (18m20s — consistent with waiting on the `legal-release`
+  environment's required-reviewer approval before moving the tag) followed 79s later by a
+  `schedule`-triggered heartbeat run that failed with `` `legal-review` is unreleased ``. That failure
+  is not a new problem: the heartbeat fired *while the release was still mid-approval-wait*, correctly
+  observed the tag hadn't moved yet at that instant, and failed loudly as designed — a timing
+  artifact of the heartbeat overlapping an in-flight release, not evidence anything is broken.
+- Blast radius, measured fresh with `~/repos/sharedinfra/scripts/legal-pin-drift.py` (not
+  `gh search code`, which under-reports by org in this lane — see this session's own memory note on
+  that): **17 `legal-review.yml` caller lines across 17 repos** (of 18 repos that call any
+  `infra-commons/legal` reusable at all):
+  - **12 track `legal-review/v1`** (`cashbucket-com/legal`, `cashbucket-com/operations`,
+    `cashbucket-com/website`; `klsjapan-com/klsjapan-website`, `klsjapan-com/legal`,
+    `klsjapan-com/meta`, `klsjapan-com/nutrition-tracker`; `rolliq-com/devops`, `rolliq-com/legal`,
+    `rolliq-com/marketing`, `rolliq-com/operations`, `rolliq-com/website`) — these receive this PR's
+    fix the next time `legal-review/v1` advances, gated by the `legal-release` environment's required
+    reviewer, not by any missing credential.
+  - **1 tracks `@main` directly** — `chargingblindly-com/legal`. This is a *different and more
+    exposed* class than the tag-trackers: it has no pin review at all, so it receives this PR's fix
+    the instant it merges to `infra-commons/legal`'s `main`, with **no `legal-release` approval gate
+    in between**. `chargingblindly-com/legal` also tracks `@main` for `annual-review` and
+    `quarterly-review` — a pre-existing pin-hygiene gap this pass did not create and is not in scope
+    to fix (cross-lane; `chargingblindly-com`'s own repo), but worth surfacing since it's the single
+    most exposed line to anything this repo merges to `main`, not just this PR.
+  - **4 are SHA-pinned 10 commits behind main** (`rolliq-com/clients-config`,
+    `rolliq-com/platform-iac`, `rolliq-com/solution-recruitment-reference-check`,
+    `rolliq-com/solution-template`) and will not receive this fix until each bumps its own pin —
+    unaffected by this PR either way.
+  - `legal-capture-findings-reusable.yml` and `legal-codebase-scan-reusable.yml` (also fixed in this
+    PR) carry no moving tag at all, by design (`infra-commons/legal#23`'s delivery-contract decision
+    tag-releases only `legal-review`). Their fixes reach **no caller automatically, regardless of
+    release-mechanism status** — only when each caller repo bumps its own SHA pin.
+
+**Consequence for this PR's own risk, re-read with the real delivery path in mind:** the
+truncation guard's fail-closed choice (raise and block, rather than silently pass) is still the
+correct call — the alternative is exactly the silent-false-clean failure mode this pass exists to
+close. But it is no longer a decision made safe by being undeliverable. On the next `legal-review/v1`
+advance (after a human approves it), 12 real caller repos' PR gates start failing loudly, instead of
+passing silently, on any PR whose legal review happens to truncate at `max_tokens`. On merge to this
+repo's `main` — before any approval — `chargingblindly-com/legal`'s gate does the same, immediately.
+That is the intended behavior change, not a side effect, and it is the kind of thing the
+`legal-release` approval step exists to be told about — which is the point of correcting this section
+rather than leaving the "reaches nobody" framing in place for that approver to read.
 
 ## Not filed as issues
 
