@@ -4,9 +4,12 @@ name: Tests
 #
 # This matters more here than in an ordinary repo: `legal-review-reusable.yml` is
 # consumed by 17 callers across four orgs, and `legal-review / gate` is a REQUIRED
-# check on some of them. Once callers track the moving `legal-review/v1` tag, a
-# regression here reaches them as soon as the tag advances, with no per-caller pin
-# bump to review it first. These tests are the only automated check in between.
+# check on some of them. Most of those callers now track the moving `legal-review/v1`
+# tag (infra-commons/legal#23) — for them, a regression here reaches every caller as
+# soon as the tag advances, with no per-caller pin bump to review it first. These
+# tests are the only automated check in between. (Callers still on a SHA pin only
+# hit a regression here on their next pin bump; current counts: reviews/_pointers.md
+# or `/legal-pin-drift`.)
 #
 # Covers BOTH reusables. `legal-capture-findings-reusable.yml` had no coverage at
 # all until infra-commons/legal#18 — where its suppression matcher was found
