@@ -2,10 +2,17 @@ name: Legal review (reusable)
 
 # Reusable legal AI review, shared by every entity org legal/solution repo.
 #
+# Delivery contract (infra-commons/legal#23, decided 2026-08-15): this reusable ships via
+# the moving tag `legal-review/v1`, not a SHA pin and not `@main`. The tag can only be
+# advanced by the infra-commons-bot App (protect-moving-tags), so a caller pinning it gets
+# reviewed, released code — never an uncommitted or attacker-controlled ref. The other four
+# reusables in this repo stay SHA-pinned by design; that split is the decided contract, not
+# an oversight.
+#
 # Caller pattern (the caller must trigger on `pull_request`):
 #   jobs:
 #     legal-review:
-#       uses: infra-commons/legal/.github/workflows/legal-review-reusable.yml@main
+#       uses: infra-commons/legal/.github/workflows/legal-review-reusable.yml@legal-review/v1
 #       with:
 #         jurisdictions: 'NZ,AU'   # or 'NZ,JP' for KLS Japan
 #       secrets: inherit          # passes ANTHROPIC_API_KEY
