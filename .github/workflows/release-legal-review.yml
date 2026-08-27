@@ -102,7 +102,7 @@ jobs:
           repositories: legal
           permission-contents: write
 
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
         with:
           # Minted as the App so every git push below (tag create + moving-tag force-push)
           # is authenticated as the App, which is the only identity the ruleset lets move
@@ -137,7 +137,7 @@ jobs:
       contents: read
       actions: read # for the stuck-approval check below
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
         with:
           fetch-depth: 0
           fetch-tags: true
