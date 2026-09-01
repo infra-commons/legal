@@ -20,6 +20,12 @@ Tier 2 (control-plane repos) will be added here per-repo if/when that tier start
 | `infra-commons` | `legal` | `legal-capture-findings` (post-merge, `.github/workflows/legal-capture-findings-reusable.yml`) | `b752b17` | 2026-08-16 | [2026-08-16-tier1-legal-review-815.md](2026-08-16-tier1-legal-review-815.md) |
 | `infra-commons` | `legal` | `legal-codebase-scan` (manual audit, `.github/workflows/legal-codebase-scan-reusable.yml`) | `b752b17` | 2026-08-16 | [2026-08-16-tier1-legal-review-815.md](2026-08-16-tier1-legal-review-815.md) |
 
+**Not a review row, but read it before trusting a green `legal-review`:**
+[2026-09-01-legal-surface-path-filter-assessment.md](2026-09-01-legal-surface-path-filter-assessment.md)
+— `infra-commons/meta#1188`. Measures what the path filter can and cannot decide (it skipped a
+consent gate, a spend cap and a post-delivery read in one caller's four-PR series), rules out both
+widening the token list and matching diff content, and records the caller inputs shipped instead.
+
 **Not covered by this pass:** `security`, `devops` — out of scope per meta#815 (tracked in their own
 repos' `reviews/_pointers.md`; see `infra-commons/security`'s for the `adversarial-review` and
 `capture-findings` rows). `annual-review-reusable.yml`, `quarterly-review-reusable.yml`,
@@ -33,8 +39,16 @@ above — the release mechanism is **live** (`INFRA_COMMONS_BOT_PRIVATE_KEY` was
 see the findings doc's "Release mechanism" section for how this was verified, and for the corrected
 blast-radius count). A "last-reviewed SHA" here being on `main` still does not by itself mean a fix
 has reached every caller: 12 of 17 `legal-review.yml` callers track the tag (reached on the next
-tag-advance, gated by the `legal-release` environment's required reviewer), 1
-(`chargingblindly-com/legal`) tracks `@main` directly (reached on merge to `main`, no approval gate),
-and 4 are SHA-pinned behind and reached only when that caller bumps its own pin.
+tag-advance, gated by the `legal-release` environment's required reviewer) and 5 are SHA-pinned,
+reached only when that caller bumps its own pin.
 `legal-capture-findings` and `legal-codebase-scan` carry no moving tag at all and reach a caller only
 via that caller's own SHA-pin bump, regardless of this repo's release-mechanism status.
+
+**Corrected 2026-09-01.** The paragraph above previously read "…required reviewer), 1
+(`chargingblindly-com/legal`) tracks `@main` directly (reached on merge to `main`, no approval gate),
+and 4 are SHA-pinned behind". Re-measured with `legal-pin-drift.py` (`unreadable_orgs: []`): that
+caller is SHA-pinned like the other four, and there are **zero** `@main` lines fleet-wide. All five
+SHA pins currently read `c4948d1e`, which is exactly where `legal-review/v1` points — so every caller
+runs identical reviewer code today, while `main` sits 5 commits ahead of the tag with its release run
+held at the `legal-release` approval. So "released" and "reached the fleet" are further apart right
+now than the caution above implies.

@@ -23,6 +23,35 @@ name: Legal review (reusable)
 # Resulting checks: `<caller-job-id> / legal-review`, `<caller-job-id> / gate`.
 # Make `<caller-job-id> / gate` the required status check for repos where
 # legal CRITICAL findings must block merge.
+#
+# What the path filter can and cannot know (infra-commons/meta#1188)
+# ------------------------------------------------------------------
+# `touches_legal_surface()` matches tokens against changed file PATHS. Legal loadedness is a
+# property of what a change DOES, so a path list cannot express it — and that was measured, not
+# assumed: on one caller's four-PR feature series the filter skipped the consent gate, the spend
+# cap and the post-delivery read — 17 distinct paths between them, not one legal word — and
+# reviewed the fourth only because it happened to add a file under `prompts/schemas/`.
+#
+# Widening the token list does not fix that, and neither does matching the diff CONTENT with the
+# same tokens: measured over one caller's last 60 changes, content-matching takes the review rate
+# from 32% to 93% — tripling both the bill and the exposure to merge-blocking CRITICAL findings on
+# a required check — and STILL skips the spend cap. So the judgement stays with the caller, who
+# has it, via `force`.
+#
+# `force` is only useful as a caller EXPRESSION. Wired to a literal `true` it just means "review
+# every PR" (a defensible choice for a low-traffic legal repo, an expensive one elsewhere):
+#
+#   with:
+#     jurisdictions: 'NZ,AU'
+#     force: ${{ contains(github.event.pull_request.labels.*.name, 'legal-review') }}
+#
+# Caveat: the caller's `pull_request` `types:` decides when that expression is re-evaluated. With
+# the usual `[opened, synchronize, reopened, ready_for_review]`, a label added AFTER the run needs
+# a re-run to take effect; add `labeled` to `types:` if the label should trigger on its own.
+#
+# `extra_surface_paths` is the weaker, second lever: a caller-owned list of its own legally-loaded
+# paths. It is honest about being a path list — it goes stale the moment a NEW file implements a
+# control — but the caller at least knows which of its own files those are.
 
 permissions: {}
 
@@ -33,6 +62,22 @@ on:
         description: 'Comma-separated legal jurisdictions, e.g. "NZ,AU" or "NZ,JP"'
         required: false
         default: 'NZ,AU'
+        type: string
+      force:
+        description: >-
+          Review regardless of the path filter. Exists because the filter matches PATHS and
+          legal loadedness is a property of what the code DOES -- see the header note. Pass a
+          caller EXPRESSION, not a literal, or it degrades to "review every PR".
+        required: false
+        default: false
+        type: boolean
+      extra_surface_paths:
+        description: >-
+          Comma-separated extra path substrings this caller counts as legal surface, matched
+          exactly as the built-in tokens are. Additive only; it can never make the filter skip
+          something it would otherwise review.
+        required: false
+        default: ''
         type: string
     secrets:
       ANTHROPIC_API_KEY:
@@ -74,6 +119,8 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           JURISDICTIONS: ${{ inputs.jurisdictions }}
+          FORCE_REVIEW: ${{ inputs.force }}
+          EXTRA_SURFACE_PATHS: ${{ inputs.extra_surface_paths }}
         run: |
           python3 << 'PYEOF'
           """
@@ -85,7 +132,10 @@ jobs:
 
           Required env vars: ANTHROPIC_API_KEY, GITHUB_TOKEN, PR_NUMBER,
                              REPO, BASE_SHA, HEAD_SHA
-          Optional env vars: JURISDICTIONS (default: NZ,AU)
+          Optional env vars: JURISDICTIONS (default: NZ,AU),
+                             FORCE_REVIEW (default: false -- review regardless of the
+                             path filter), EXTRA_SURFACE_PATHS (default: empty --
+                             comma-separated caller-supplied surface substrings)
           """
           import os
           import re
@@ -324,6 +374,78 @@ jobs:
                   for path in real
                   for token in LEGAL_SURFACE_TOKENS
               )
+
+
+          def parse_extra_surface_paths(raw: str) -> list[str]:
+              """Caller-supplied surface substrings, comma-separated.
+
+              Blanks are dropped rather than kept: an empty needle is a substring of
+              every path, so a stray comma or an unset input would silently force a
+              review on every PR in that caller repo -- an expensive failure that
+              looks exactly like the filter working.
+              """
+              return [part.strip().lower() for part in raw.split(",") if part.strip()]
+
+
+          def caller_surface_hit(paths: list[str], extra: list[str]) -> bool:
+              """True if a changed path matches a caller-supplied surface substring.
+
+              Same matching rule as LEGAL_SURFACE_TOKENS -- plain substring, anywhere,
+              case-folded -- so a caller does not have to learn a second one. Purely
+              ADDITIVE: with `extra` empty this is False and the decision is exactly
+              what touches_legal_surface() alone says.
+              """
+              if not extra:
+                  return False
+              return any(
+                  needle in path.lower()
+                  for path in paths
+                  if path.strip()
+                  for needle in extra
+              )
+
+
+          def parse_force(raw: str) -> bool:
+              """Whether the caller forced a review.
+
+              Fails TOWARD reviewing, matching this file's standing direction: the
+              error we must not make is skipping a PR that carried legal surface.
+              `inputs.force` is a typed boolean so GitHub only ever hands us "true"
+              or "false", but a caller wiring the env var by hand could hand us
+              anything, and "review too much" is the safe reading of anything else.
+              """
+              return raw.strip().lower() not in ("", "false", "0", "no")
+
+
+          def should_review(paths: list[str], force: bool, extra: list[str]) -> bool:
+              """The whole gate decision, in one place.
+
+              touches_legal_surface() is deliberately left alone by this: every
+              property that guards it (monotone under union, fail-closed on an
+              unknown path list, unanchored, case-insensitive) is a statement about
+              that function, and adding caller inputs to it would quietly restate
+              them all. The caller levers are an OR on top.
+              """
+              return force or touches_legal_surface(paths) or caller_surface_hit(paths, extra)
+
+
+          def write_step_summary(line: str) -> None:
+              """Say on the run page which of the two things happened.
+
+              A skip and a clean review are the same green tick on the PR -- the skip
+              posts no comment -- so the only trace today is one line buried in the
+              job log, and a green `legal-review` gets read as assurance it never
+              gave. Best-effort: a summary that cannot be written must never fail a
+              required check.
+              """
+              path = os.environ.get("GITHUB_STEP_SUMMARY", "")
+              if not path:
+                  return
+              try:
+                  with open(path, "a", encoding="utf-8") as fh:
+                      fh.write(line + "\n")
+              except OSError as exc:  # noqa: BLE001 -- reporting, never gating
+                  print(f"Could not write step summary ({exc}).", file=sys.stderr)
 
 
           def get_repo_context() -> str:
@@ -710,9 +832,15 @@ jobs:
               base_sha = os.environ.get("BASE_SHA", "")
               head_sha = os.environ.get("HEAD_SHA", "")
               jurisdictions = os.environ.get("JURISDICTIONS", "NZ,AU")
+              force = parse_force(os.environ.get("FORCE_REVIEW", ""))
+              extra_surface = parse_extra_surface_paths(os.environ.get("EXTRA_SURFACE_PATHS", ""))
 
               if not api_key:
                   print("ANTHROPIC_API_KEY not set -- skipping legal review.", file=sys.stderr)
+                  write_step_summary(
+                      "### Legal review SKIPPED\n\n`ANTHROPIC_API_KEY` is not set, so no "
+                      "review ran. **This is not a clean legal review.**"
+                  )
                   set_github_output("has_critical", "false")
                   return
 
@@ -745,13 +873,25 @@ jobs:
               except Exception as exc:  # noqa: BLE001 -- fail-closed, review anyway
                   print(f"Could not list changed files ({exc}) -- reviewing anyway.", file=sys.stderr)
                   changed = []
-              if not touches_legal_surface(changed):
+              if not should_review(changed, force, extra_surface):
                   print(
                       f"No legal surface in {len(changed)} changed file(s) "
                       "-- skipping legal review."
                   )
+                  write_step_summary(
+                      f"### Legal review SKIPPED\n\nNo legal surface matched in "
+                      f"{len(changed)} changed file(s), so no review ran. **This is not a "
+                      "clean legal review** -- the filter matches file paths, not what the "
+                      "change does. If this PR is legally loaded, see `force` in "
+                      "`legal-review-reusable.yml`'s header."
+                  )
                   set_github_output("has_critical", "false")
                   return
+
+              if force:
+                  print("Review forced by the caller -- path filter not consulted.")
+              elif not touches_legal_surface(changed):
+                  print("Matched a caller-supplied surface path.")
 
               context = get_repo_context()
               suppressions = load_suppressions(token, repo)
@@ -763,6 +903,12 @@ jobs:
 
               critical = has_critical_findings(review)
               set_github_output("has_critical", "true" if critical else "false")
+              write_step_summary(
+                  "### Legal review RAN\n\n"
+                  f"Reviewed {len(changed)} changed file(s) with `{MODEL}`. "
+                  + ("**CRITICAL findings present** -- see the PR comment."
+                     if critical else "No CRITICAL findings.")
+              )
 
               comment_body = (
                   f"{MARKER}\n"

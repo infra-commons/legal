@@ -199,3 +199,128 @@ def test_get_changed_files_lists_every_file_on_a_big_diff(reviewer, tmp_path, mo
     # truncating implementation -- its presence is what keeps the filter honest.
     assert "policies/privacy.md" in changed
     assert reviewer.touches_legal_surface(changed) is True
+
+
+# ── the caller levers (infra-commons/meta#1188) ───────────────────────────────
+#
+# `force` and `extra_surface_paths` exist because the filter matches PATHS and
+# legal loadedness is a property of what a change DOES: measured, a caller's
+# four-PR series had its consent gate, spend cap and post-delivery read skipped
+# and its fourth PR reviewed only because it added a file under a directory
+# named `schemas`. These properties pin the two things that make that lever safe
+# to add to a REQUIRED check across the fleet -- it is inert until a caller
+# passes something, and it can only ever review MORE.
+
+def _extra(reviewer, raw):
+    return reviewer.parse_extra_surface_paths(raw)
+
+
+@given(paths=path_lists)
+@settings(max_examples=300)
+def test_default_inputs_change_nothing(reviewer, paths):
+    """The whole blast-radius argument, as a property.
+
+    With no caller passing anything, `should_review` must agree with
+    `touches_legal_surface` on EVERY input -- otherwise merging this reaches 17
+    caller repos as a live behaviour change rather than an opt-in.
+    """
+    assert (reviewer.should_review(paths, False, [])
+            is reviewer.touches_legal_surface(paths))
+
+
+@given(paths=path_lists)
+@settings(max_examples=200)
+def test_force_always_reviews(reviewer, paths):
+    """Forced means reviewed, whatever the paths look like -- including none."""
+    assert reviewer.should_review(paths, True, []) is True
+
+
+@given(paths=st.lists(clean_text, min_size=1, max_size=6))
+@settings(max_examples=200)
+def test_force_reviews_paths_the_filter_would_skip(reviewer, paths):
+    """The case that motivated the input: token-free paths, reviewed anyway."""
+    assume(not reviewer.touches_legal_surface(paths))
+    assert reviewer.should_review(paths, True, []) is True
+
+
+@given(paths=path_lists, extra=st.lists(clean_text, max_size=4))
+@settings(max_examples=300)
+def test_caller_levers_are_additive_only(reviewer, paths, extra):
+    """Neither lever can turn review -> skip.
+
+    Same direction as monotone-under-union, over the other axis: a caller can
+    buy itself more review, never less. A lever that could subtract would let a
+    caller silently disable a gate its own org made required.
+    """
+    if reviewer.touches_legal_surface(paths):
+        assert reviewer.should_review(paths, False, extra) is True
+        assert reviewer.should_review(paths, True, extra) is True
+
+
+@given(data=st.data(), prefix=clean_text, suffix=clean_text)
+@settings(max_examples=200)
+def test_extra_surface_paths_match_like_the_builtin_tokens(reviewer, data, prefix, suffix):
+    """Plain substring, anywhere, case-folded -- one matching rule, not two."""
+    needle = data.draw(st.sampled_from(["webhooks.py", "src/config", "ANALYTICS"]))
+    path = f"{prefix}{needle}{suffix}"
+    assume(not reviewer.touches_legal_surface([path]))
+    assert reviewer.should_review([path], False, _extra(reviewer, needle)) is True
+
+
+@pytest.mark.parametrize("raw", ["", "   ", ",", " , ,\t", "\n"])
+def test_blank_extra_surface_paths_matches_nothing(reviewer, raw):
+    """An empty needle is a substring of every path.
+
+    A stray comma or an unset input must not quietly force a billed review on
+    every PR in a caller repo -- a failure that looks exactly like the filter
+    working.
+    """
+    assert _extra(reviewer, raw) == []
+    assert reviewer.should_review(["src/utils/translate.py"], False, _extra(reviewer, raw)) is False
+
+
+def test_extra_surface_paths_splits_and_folds(reviewer):
+    assert _extra(reviewer, "Src/Config.py, infra/main.tf ,") == ["src/config.py", "infra/main.tf"]
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("true", True), ("True", True), ("TRUE", True), ("1", True), ("yes", True),
+    ("false", False), ("False", False), ("0", False), ("no", False),
+    ("", False), ("   ", False),
+])
+def test_parse_force_reads_the_declared_values(reviewer, raw, expected):
+    assert reviewer.parse_force(raw) is expected
+
+
+@pytest.mark.parametrize("raw", ["maybe", "on", "y", "tru", "1.0"])
+def test_parse_force_fails_toward_reviewing(reviewer, raw):
+    """Anything unrecognised means review.
+
+    `inputs.force` is a typed boolean so GitHub only ever hands us `true`/
+    `false`, but the direction still has to be stated: the error this file must
+    never make is skipping a PR that carried legal surface.
+    """
+    assert reviewer.parse_force(raw) is True
+
+
+# ── the skip is legible ───────────────────────────────────────────────────────
+
+def test_step_summary_says_a_skip_is_not_a_review(reviewer, tmp_path, monkeypatch):
+    """A skip posts no PR comment, so the run page is the only place it can say so."""
+    summary = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    reviewer.write_step_summary("### Legal review SKIPPED\n\nnot a clean review")
+    assert "SKIPPED" in summary.read_text(encoding="utf-8")
+
+
+def test_step_summary_is_best_effort(reviewer, monkeypatch):
+    """Reporting must never fail a required check.
+
+    Unset (act, a local exec) and unwritable (a hardened runner) both have to be
+    survivable -- the gate's verdict does not depend on this line landing.
+    """
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    reviewer.write_step_summary("no sink")  # must not raise
+
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", "/nonexistent-dir/summary.md")
+    reviewer.write_step_summary("unwritable sink")  # must not raise
