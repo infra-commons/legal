@@ -167,7 +167,18 @@ jobs:
           REPO_LOCAL_SUPPRESSIONS_PATH = ".github/legal-review-suppressions.yml"
           MAX_SUPPRESSIONS_BYTES = 256_000  # bound runner memory on a hostile/huge file
           MAX_DIFF_CHARS = 60_000
-          MODEL = "claude-sonnet-4-6"
+          # MID tier, matching infra-commons/security's adversarial gate
+          # (.github/actions/adversarial-review/adversarial-review.py:57). Both gates merge
+          # fleet-wide as required checks; this pin closes a full-generation split between
+          # the two canonical AI reviewers (measured 2026-09-01).
+          #
+          # A model swap on a reviewer gate is NOT a one-line change. Findings reach the
+          # suppression filter as free-text prose, and the merge verdict is parsed out of
+          # the model's Markdown -- both are worded by the model, so a new generation can
+          # silently resurface settled false positives (the still-open gpt-4o -> gpt-5.5
+          # regression) or, worse, read as clean. The format guards below are what make
+          # this pin safe to move; do not move it again without re-reading them.
+          MODEL = "claude-sonnet-5"
           ALLOWED_SEVERITIES = {"CRITICAL", "HIGH", "MEDIUM", "LOW"}
           _SHA_RE = re.compile(r'^[0-9a-fA-F]{40}$')
           _TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=10.0)
@@ -395,16 +406,42 @@ jobs:
 
 
           def parse_findings(text: str) -> list[dict]:
+              """Extract findings from the model's JSON response.
+
+              Raises RuntimeError when the response is non-empty but yields no readable
+              JSON object. This half is the post-merge safety net -- the last thing that
+              looks at a diff after it has already landed -- so "0 findings" and "I could
+              not read the response" must not be the same outcome. They were: both paths
+              below returned [], the run went green, and nothing was filed.
+
+              Output shape is model-generation-dependent (this is brace-scanning, not
+              parsing: a response that wraps its JSON in a Markdown fence, or writes any
+              prose containing an opening brace first, mis-slices), so a model swap is
+              exactly when a silent [] would have appeared.
+              """
               start = text.find("{")
               end = text.rfind("}")
               if start == -1 or end <= start:
-                  print("Warning: could not extract JSON from review output", file=sys.stderr)
-                  return []
+                  if not text.strip():
+                      # Genuinely empty response: nothing to mis-read, and the max_tokens
+                      # guard in review_diff() already covers the truncation case.
+                      return []
+                  raise RuntimeError(
+                      "Could not extract a JSON object from the legal review response -- "
+                      "refusing to record 'no findings' from a response that could not be "
+                      "read. The model was asked to return a JSON object only; this usually "
+                      "means it changed output format (e.g. wrapped the JSON in a Markdown "
+                      f"fence). Response began: {text[:200]!r}"
+                  )
               try:
                   data = json.loads(text[start:end + 1])
               except json.JSONDecodeError as exc:
-                  print(f"Warning: JSON parse error: {exc}", file=sys.stderr)
-                  return []
+                  raise RuntimeError(
+                      f"Legal review response did not contain valid JSON ({exc}) -- refusing "
+                      "to record 'no findings' from an unparseable response. Note the "
+                      "extraction is a brace scan, so prose containing an opening brace "
+                      f"before the JSON produces a malformed slice. Began: {text[:200]!r}"
+                  ) from exc
               findings = []
               for raw in data.get("findings", []):
                   sev = str(raw.get("severity", "")).upper()

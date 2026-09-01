@@ -116,4 +116,11 @@ def test_scan_module_execs_cleanly_from_its_workflow_heredoc(scan):
     """
     assert hasattr(scan, "parse_findings")
     assert hasattr(scan, "file_issue")
-    assert scan.parse_findings("not json") == []
+    # This used to assert `parse_findings("not json") == []`, i.e. that an
+    # unreadable response was reported as a clean scan. That is the fail-open
+    # behaviour the claude-sonnet-5 pin swap made unsafe to keep: output shape is
+    # model-generation-dependent, so "I could not read this" and "there is nothing
+    # here" must not be the same return value. It now raises; see
+    # test_legal_model_pin_and_format.py for the full contract.
+    with pytest.raises(RuntimeError, match="SCAN_COMPLETE"):
+        scan.parse_findings("not json")

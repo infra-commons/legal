@@ -99,7 +99,18 @@ jobs:
           GITHUB_API = "https://api.github.com"
           _GITHUB_TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=10.0)
           MAX_DIFF_CHARS = 60_000
-          MODEL = "claude-sonnet-4-6"
+          # MID tier, matching infra-commons/security's adversarial gate
+          # (.github/actions/adversarial-review/adversarial-review.py:57). Both gates merge
+          # fleet-wide as required checks; this pin closes a full-generation split between
+          # the two canonical AI reviewers (measured 2026-09-01).
+          #
+          # A model swap on a reviewer gate is NOT a one-line change. Findings reach the
+          # suppression filter as free-text prose, and the merge verdict is parsed out of
+          # the model's Markdown -- both are worded by the model, so a new generation can
+          # silently resurface settled false positives (the still-open gpt-4o -> gpt-5.5
+          # regression) or, worse, read as clean. The format guards below are what make
+          # this pin safe to move; do not move it again without re-reading them.
+          MODEL = "claude-sonnet-5"
           MARKER = "<!-- legal-review-bot -->"
           _SHA_RE = re.compile(r'^[0-9a-f]{40}$')
           CANONICAL_SUPPRESSIONS_REPO = "infra-commons/legal"
@@ -349,8 +360,11 @@ jobs:
                   max_tokens=4096,
                   # system_prompt is static per jurisdiction set (only ever extended by
                   # the appended suppression context, never shrunk) and comfortably
-                  # clears the 1,024-token Sonnet-4.6 cache minimum, so it's cacheable
-                  # across consecutive reviews on the same repo within the TTL.
+                  # clears the minimum cacheable prefix, so it's cacheable across
+                  # consecutive reviews on the same repo within the TTL. That minimum is
+                  # model-dependent, so it is re-checked whenever MODEL moves; a model
+                  # whose minimum exceeds this prompt loses caching silently -- a cost
+                  # and latency regression, never a correctness one.
                   system=[{
                       "type": "text",
                       "text": system_prompt,
@@ -375,21 +389,80 @@ jobs:
               return message.content[0].text
 
 
+          # Matches the CRITICAL section heading and captures it up to the next heading of
+          # the same-or-shallower level (or end of response).
+          #
+          # Deliberately broader than the `### CRITICAL` the system prompt asks for. The
+          # template is a REQUEST to a language model, not a guaranteed wire format, and the
+          # exact heading style is the kind of thing that shifts between model generations
+          # for no semantic reason. Every variant tolerated here means one fewer way for a
+          # real CRITICAL finding to be parsed as "no findings" -- which, before the guard
+          # below, silently PASSED the merge gate.
+          _CRITICAL_SECTION_RE = re.compile(
+              r"^[ \t]{0,3}(?:\#{2,4}[ \t]*|\*\*[ \t]*)CRITICAL\b[^\n]*\n(.*?)"
+              r"(?=\n[ \t]{0,3}(?:\#{2,4}[ \t]|\*\*[ \t]*(?:HIGH|MEDIUM|LOW|SUMMARY)\b)|\Z)",
+              re.DOTALL | re.IGNORECASE | re.MULTILINE,
+          )
+
+          # Any severity heading at all. Used only to tell "the model answered in the shape
+          # we asked for and had no CRITICAL findings" apart from "we cannot read this
+          # response", which are the same string to the regex above but opposite verdicts.
+          _ANY_SEVERITY_SECTION_RE = re.compile(
+              r"^[ \t]{0,3}(?:\#{2,4}[ \t]*|\*\*[ \t]*)"
+              r"(?:CRITICAL|HIGH|MEDIUM|LOW|SUMMARY)\b",
+              re.IGNORECASE | re.MULTILINE,
+          )
+
+
           def has_critical_findings(review: str) -> bool:
-              m = re.search(
-                  r"###\s+CRITICAL[^\n]*\n(.*?)(?=\n###|\Z)",
-                  review,
-                  re.DOTALL | re.IGNORECASE,
-              )
+              """True if the review reports at least one CRITICAL finding.
+
+              Raises RuntimeError if the response cannot be read as a legal review at all.
+
+              This function IS the merge gate: its return value becomes the `has_critical`
+              output that the `gate` job blocks on. It used to `return False` whenever the
+              CRITICAL heading did not match, which meant every unreadable response -- a
+              reformatted answer, a refusal, a preamble that shifted the heading, an empty
+              string -- was indistinguishable from a clean review and merged the PR.
+
+              That is the same class of gap infra-commons/security#109 found in
+              adversarial-review.py's call_anthropic(), and the same one the max_tokens
+              guard in run_review() already fails loud on: a partial or unreadable answer
+              must never stand in for a completed review. A model swap is exactly when it
+              would have fired, because output shape is model-generation-dependent while
+              this parser is not.
+
+              Fail CLOSED instead. The system prompt requires all four severity sections on
+              every response, with an explicit "None" bullet when a section is empty, so a
+              response containing no severity heading of any kind is unparseable by
+              construction -- not clean. Absence is an accurate signal here, which is what
+              keeps this from being a guard that cries wolf on the healthy case.
+              """
+              m = _CRITICAL_SECTION_RE.search(review)
               if not m:
-                  return False
+                  if _ANY_SEVERITY_SECTION_RE.search(review):
+                      # Well-formed review, CRITICAL section genuinely absent or omitted as
+                      # empty. The model answered in the shape we asked for; believe it.
+                      return False
+                  raise RuntimeError(
+                      "Legal review response contains no recognisable severity section -- "
+                      "cannot determine whether CRITICAL findings are present. Refusing to "
+                      "report a clean review from an unreadable response. This usually means "
+                      "the reviewing model changed its output format; compare the response "
+                      "against the template in SYSTEM_PROMPT and widen "
+                      "_CRITICAL_SECTION_RE / _ANY_SEVERITY_SECTION_RE to match. "
+                      f"Response began: {review[:200]!r}"
+                  )
               section = m.group(1).strip()
               for line in section.splitlines():
                   stripped = line.strip()
-                  if not re.match(r'^-\s+', stripped):
+                  if not re.match(r'^[-*]\s+', stripped):
                       continue
-                  content = re.sub(r'^-\s+', '', stripped)
+                  content = re.sub(r'^[-*]\s+', '', stripped)
                   content = re.sub(r'^\[.*?\]\s*', '', content)
+                  # Strip the surrounding italic/bold markers the template uses for the
+                  # empty-section marker, e.g. `- _(None)_`, so it is still read as "none".
+                  content = content.strip('*_ ').lstrip('(').rstrip(')').strip()
                   if not content or re.match(r'^[Nn]one[.!?\s]*$', content):
                       continue
                   return True
