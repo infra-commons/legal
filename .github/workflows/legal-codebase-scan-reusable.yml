@@ -81,7 +81,18 @@ jobs:
 
           GITHUB_API = "https://api.github.com"
           TIMEOUT = httpx.Timeout(connect=10.0, read=60.0, write=10.0, pool=10.0)
-          MODEL = "claude-sonnet-4-6"
+          # MID tier, matching infra-commons/security's adversarial gate
+          # (.github/actions/adversarial-review/adversarial-review.py:57). Both gates merge
+          # fleet-wide as required checks; this pin closes a full-generation split between
+          # the two canonical AI reviewers (measured 2026-09-01).
+          #
+          # A model swap on a reviewer gate is NOT a one-line change. Findings reach the
+          # suppression filter as free-text prose, and the merge verdict is parsed out of
+          # the model's Markdown -- both are worded by the model, so a new generation can
+          # silently resurface settled false positives (the still-open gpt-4o -> gpt-5.5
+          # regression) or, worse, read as clean. The format guards below are what make
+          # this pin safe to move; do not move it again without re-reading them.
+          MODEL = "claude-sonnet-5"
           AUDIT_LABEL = "legal-audit"
           AUDIT_LABEL_COLOR = "0075ca"
           MAX_BATCH_CHARS = 40_000
@@ -251,10 +262,31 @@ jobs:
               return "\n".join(parts)
 
           def parse_findings(text: str) -> list[dict]:
+              """Parse SEVERITY|file:line|Category|Description lines from the scan response.
+
+              Raises RuntimeError when the response is non-empty, parses to zero findings,
+              and is missing the SCAN_COMPLETE sentinel.
+
+              The prompt has always asked the model to end its response with SCAN_COMPLETE,
+              and this parser has always thrown that line away without checking it -- so the
+              one completeness signal the format was designed to carry was never read. Every
+              non-conforming response (a Markdown fence, a preamble, multi-line descriptions,
+              a different separator) silently yielded zero findings and a green run.
+
+              Requiring the sentinel only on the zero-finding path is deliberate: a response
+              that produced findings demonstrably parsed, so failing it on a missing trailer
+              would be crying wolf on the healthy case. A response that produced nothing AND
+              never said it finished is the one that cannot be distinguished from a clean
+              scan, which is the case worth stopping.
+              """
               findings = []
+              saw_sentinel = False
               for line in text.splitlines():
                   line = line.strip()
-                  if not line or line == "SCAN_COMPLETE":
+                  if line == "SCAN_COMPLETE":
+                      saw_sentinel = True
+                      continue
+                  if not line:
                       continue
                   parts = line.split("|", 3)
                   if len(parts) != 4:
@@ -269,6 +301,15 @@ jobs:
                       "category": category.strip(),
                       "description": desc.strip(),
                   })
+              if not findings and not saw_sentinel and text.strip():
+                  raise RuntimeError(
+                      "Codebase scan response produced no findings and no SCAN_COMPLETE "
+                      "sentinel -- refusing to record a clean scan from a response that may "
+                      "not have been read. Expected lines of the form "
+                      "SEVERITY|file:line|Category|Description. This usually means the "
+                      "reviewing model changed its output format (e.g. wrapped the lines in "
+                      f"a Markdown fence). Response began: {text[:200]!r}"
+                  )
               return findings
 
           def gh_headers() -> dict:
