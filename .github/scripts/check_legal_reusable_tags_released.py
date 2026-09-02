@@ -74,8 +74,13 @@ def moving_tag_for(family: str, root: Path) -> str | None:
         out = git("tag", "--list", f"{family}/v*", cwd=root, quiet=True)
     except subprocess.CalledProcessError:
         return None
-    moving = sorted(t.strip() for t in out.splitlines() if _MOVING_TAG_RE.match(t.strip()))
-    return moving[-1] if moving else None
+    # Keyed on the major as an INTEGER. `sorted()` on the tag strings is lexicographic, which
+    # silently starts selecting `v9` over `v10` the day a tenth major exists -- releasing the
+    # wrong major line while looking entirely healthy.
+    moving = [t.strip() for t in out.splitlines() if _MOVING_TAG_RE.match(t.strip())]
+    if not moving:
+        return None
+    return max(moving, key=lambda tag: int(tag.rsplit("/v", 1)[1]))
 
 
 def discover_families(root: Path) -> dict[str, str]:
@@ -104,6 +109,22 @@ def content_hash(ref: str, path: str, root: Path) -> str | None:
         return git("rev-parse", f"{ref}:{path}", cwd=root, quiet=True)
     except subprocess.CalledProcessError:
         return None
+
+
+def is_ancestor(maybe_ancestor: str, descendant: str, root: Path) -> bool:
+    """True if `maybe_ancestor` is reachable from `descendant`.
+
+    `git merge-base --is-ancestor` exits 1 for a clean "no" and 128 for a bad ref. Only the
+    former is an answer, so anything else propagates rather than being read as "no" -- a
+    mistyped ref must not be indistinguishable from a divergent history.
+    """
+    try:
+        git("merge-base", "--is-ancestor", maybe_ancestor, descendant, cwd=root, quiet=True)
+        return True
+    except subprocess.CalledProcessError as exc:
+        if exc.returncode == 1:
+            return False
+        raise
 
 
 def evaluate(pins: dict[str, str], head_hashes: dict[str, str | None], tag_hashes: dict[str, str | None]):
@@ -159,6 +180,21 @@ def main() -> int:
     tag_hashes = {f: content_hash(pins[f], reusable_path(f), root) for f in pins}
 
     stale, errors = evaluate(pins, head_hashes, tag_hashes)
+
+    # `release-legal-review.yml`'s release job runs this pinned to `workflow_run.head_sha`,
+    # NOT to `main` -- outside the "meaningful only on `main`" precondition documented above.
+    # There, a tag sitting at a DESCENDANT of HEAD means a newer release already shipped this
+    # run's code and more, so this run's delivery IS in place and content inequality is the
+    # expected, correct state. On `main` that situation cannot arise, the flag stays unset,
+    # and the strict content check is unweakened where it does the work.
+    if os.environ.get("ALLOW_TAG_AHEAD_OF_HEAD", "").lower() in {"1", "true", "yes"}:
+        ahead = [f for f in stale if is_ancestor("HEAD", pins[f], root)]
+        for family in ahead:
+            print(
+                f"{family}: `{pins[family]}` is at a descendant of HEAD -- a newer release "
+                f"already carries this commit's code. Released."
+            )
+        stale = [f for f in stale if f not in ahead]
 
     for family in stale:
         print(

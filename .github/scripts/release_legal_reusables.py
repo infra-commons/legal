@@ -25,6 +25,11 @@ Safety properties, in the order they matter:
   file, so a tag already pointing at equivalent content is left alone and the job is a no-op
   on the overwhelming majority of pushes.
 * **Idempotent.** Re-running on an unchanged `main` releases nothing.
+* **Forward-only.** The moving tag is never moved onto a commit the tag is already ahead
+  of. This job checks out `workflow_run.head_sha`, and more than one run can sit on the
+  `legal-release` gate at once with no imposed approval order -- so a stale run must not
+  un-release a newer one. Ancestry decides ORDER only; it says nothing about whether the
+  newer release was good.
 * **App-authenticated push.** The calling workflow checks out with a token minted for the
   `infra-commons-bot` App — the only identity `protect-moving-tags` lets move `*/v1` here
   (unlike infra-commons/security, whose ruleset permits `GITHUB_TOKEN`; see
@@ -44,6 +49,7 @@ from check_legal_reusable_tags_released import (  # noqa: E402
     discover_families,
     content_hash,
     git,
+    is_ancestor,
     reusable_path,
 )
 
@@ -97,6 +103,35 @@ def main() -> int:
         if head_hash == tag_hash:
             print(f"{family}: already released at `{moving_tag}`, nothing to do")
             continue
+
+        # Ancestry establishes ORDER, never correctness -- and order is the thing this job
+        # cannot otherwise know. It checks out `workflow_run.head_sha`, not `main`, and more
+        # than one run can sit on the `legal-release` gate at once (runs 25/26 did, pinned to
+        # different commits; 10/19 did for days). The environment imposes no approval order,
+        # so approving the newer run first would leave the older one force-moving the moving
+        # tag BACKWARD onto its own stale commit -- un-releasing merged code to every caller
+        # and passing its own post-move verify, which compares the tag against that same
+        # stale HEAD. The tag is known to exist here: `discover_families` found it.
+        tag_commit = git("rev-parse", f"{moving_tag}^{{commit}}", cwd=root)
+        if not is_ancestor(moving_tag, "HEAD", root):
+            if is_ancestor("HEAD", moving_tag, root):
+                # Says only that a later commit is tagged, which is all ancestry can show.
+                # Deliberately claims nothing about whether that release was any good.
+                print(
+                    f"{family}: `{moving_tag}` is at {tag_commit[:12]}, a descendant of this "
+                    f"run's {head[:12]}. Superseded by a newer release; nothing to release "
+                    f"here. Not moving the tag backward."
+                )
+                continue
+            print(
+                f"::error::{family}: refusing to move `{moving_tag}`. The tag is at "
+                f"{tag_commit[:12]}, which is neither an ancestor nor a descendant of this "
+                f"run's {head[:12]}, so the direction of the move cannot be established. "
+                f"Histories diverged (a force-push to `main`, or a tag pointed at an "
+                f"unrelated commit); resolve that deliberately rather than letting a release "
+                f"guess."
+            )
+            return 1
 
         version_tag = next_version(family, moving_tag, root)
         state = "does not exist yet" if tag_hash is None else "is behind"

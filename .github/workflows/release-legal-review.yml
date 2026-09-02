@@ -126,6 +126,16 @@ jobs:
         # Separate from the step above on purpose. The release step reporting success is
         # the release mechanism vouching for itself; this re-reads the tags from the remote
         # and compares content.
+        env:
+          # This job is checked out at `workflow_run.head_sha`, not at `main`. When more than
+          # one run is queued on the gate and the newer is approved first, the older one finds
+          # the moving tag already AHEAD of its own commit: it correctly releases nothing, and
+          # the fleet already has its code. That is a delivered release, not a stale one, so
+          # this step accepts a tag at a descendant of HEAD — and independently re-derives that
+          # relationship from the tags rather than taking the release step's word for it. The
+          # `verify` job below runs on `main`, leaves this unset, and keeps the strict
+          # content-equality check.
+          ALLOW_TAG_AHEAD_OF_HEAD: "1"
         run: python .github/scripts/check_legal_reusable_tags_released.py
 
   verify:
