@@ -35,7 +35,16 @@ WORKFLOW_FILE = "release-legal-review.yml"
 # A run in one of these has been created and is not running: it is either held by a
 # deployment protection rule (`waiting`) or held behind the concurrency group (`queued` /
 # `pending`). Both mean the release has not happened, and neither reports itself anywhere.
-_HELD_STATUSES = frozenset({"waiting", "queued", "pending", "action_required", "requested"})
+#
+# They are held by DIFFERENT things and take different actions, so they are reported
+# separately. A run at the gate has a live `pending_deployments` entry and an Approve button;
+# a run behind the concurrency group has an EMPTY one and no button at all -- it advances
+# only when the run ahead of it clears. Reporting the second as "waiting on `legal-release`"
+# sends the reviewer to a control that does not exist for that run, which is worse than
+# silence because it looks like it worked.
+_GATE_STATUSES = frozenset({"waiting", "action_required", "requested"})
+_CONCURRENCY_STATUSES = frozenset({"queued", "pending"})
+_HELD_STATUSES = _GATE_STATUSES | _CONCURRENCY_STATUSES
 
 # A release nobody has approved overnight is ordinary — the reviewer is asleep. A day later
 # it is not, and by then a fix merged behind it has been unreleased for a day with every
@@ -78,12 +87,22 @@ def evaluate(runs, now: datetime, threshold_hours: float = DEFAULT_THRESHOLD_HOU
         if held_hours < threshold_hours:
             continue
         stuck.append(run)
+        if run.get("status") in _GATE_STATUSES:
+            held_by = (
+                "It is at the `legal-release` approval gate and is waiting on a reviewer; "
+                "approve or cancel it"
+            )
+        else:
+            held_by = (
+                "It is held behind the `release-legal-review` concurrency group, NOT at the "
+                "approval gate -- there is no approval to give on this run. It advances only "
+                "once the run ahead of it is approved or cancelled"
+            )
         messages.append(
             f"::error::Release run {run['id']} has been `{run['status']}` for "
-            f"{held_hours:.0f}h (since {run['created_at']}). A release waiting on "
-            f"`legal-release` moves no tags, so every reusable merged behind it is "
-            f"unreleased while `main` reads as shipped. Approve or cancel it: "
-            f"{run.get('html_url', '(no url)')}"
+            f"{held_hours:.0f}h (since {run['created_at']}). A held release moves no tags, so "
+            f"every reusable merged behind it is unreleased while `main` reads as shipped. "
+            f"{held_by}: {run.get('html_url', '(no url)')}"
         )
 
     if not stuck:
