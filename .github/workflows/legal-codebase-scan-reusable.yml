@@ -96,6 +96,12 @@ jobs:
           AUDIT_LABEL = "legal-audit"
           AUDIT_LABEL_COLOR = "0075ca"
           MAX_BATCH_CHARS = 40_000
+          # Output ceiling for the model call. 4096 truncated routine calls
+          # (infra-commons/legal#47): the pinned model reasons by default and those tokens
+          # are billed inside this same budget. Not raised further -- the SDK refuses a
+          # non-streaming call whose 3600 * max_tokens / 128_000 exceeds its 600s ceiling,
+          # about 21,300 tokens; past that the answer is streaming, not a bigger number.
+          MAX_OUTPUT_TOKENS = 16384
           MAX_FILES = int(os.environ.get("MAX_FILES", "80"))
           REPO = os.environ.get("REPO", "")
           JURISDICTIONS = os.environ.get("JURISDICTIONS", "NZ,AU")
@@ -261,6 +267,36 @@ jobs:
               parts.append("Review the files above for legal risks. List findings in SEVERITY|file:line|Category|Description format, then SCAN_COMPLETE.")
               return "\n".join(parts)
 
+          def _response_text(message) -> str:
+              """Concatenate the text blocks of an Anthropic response, in order.
+
+              `message.content` is a LIST and only some blocks carry text. The pinned
+              model reasons by default, so the FIRST block is routinely a reasoning block
+              with no `.text`: `content[0].text` raised AttributeError on every real PR
+              (infra-commons/legal#47), and those reasoning tokens are billed inside
+              MAX_OUTPUT_TOKENS too -- one root cause behind both of that issue's symptoms.
+
+              Filter on `block.type`, never the block's class: an unknown block type
+              deserialises into the FIRST member of the content union -- a text block --
+              carrying that type and no usable text, which isinstance() and hasattr()
+              accept and `type == "text"` does not. Raising rather than returning ""
+              keeps an unreadable response from reading as "no findings" downstream.
+              """
+              blocks = getattr(message, "content", None) or []
+              parts = [
+                  b.text
+                  for b in blocks
+                  if getattr(b, "type", None) == "text" and isinstance(getattr(b, "text", None), str)
+              ]
+              text = "\n".join(parts)
+              if not text.strip():
+                  seen = ", ".join(sorted({str(getattr(b, "type", "?")) for b in blocks})) or "none"
+                  raise RuntimeError(
+                      f"Anthropic response carried no readable text block (block types seen: "
+                      f"{seen}) -- refusing to read an unreadable response as a completed review."
+                  )
+              return text
+
           def parse_findings(text: str) -> list[dict]:
               """Parse SEVERITY|file:line|Category|Description lines from the scan response.
 
@@ -386,7 +422,7 @@ jobs:
                   try:
                       msg = client_ai.messages.create(
                           model=MODEL,
-                          max_tokens=4096,
+                          max_tokens=MAX_OUTPUT_TOKENS,
                           system=system_prompt,
                           messages=[{"role": "user", "content": user_content}],
                       )
@@ -401,7 +437,7 @@ jobs:
                               f"({msg.usage.output_tokens} output tokens) -- skipping "
                               "this batch rather than parsing a partial response"
                           )
-                      findings = parse_findings(msg.content[0].text)
+                      findings = parse_findings(_response_text(msg))
                       print(f"  Found {len(findings)} finding(s).")
                       all_findings.extend(findings)
                   except Exception as e:

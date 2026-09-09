@@ -149,6 +149,12 @@ jobs:
           GITHUB_API = "https://api.github.com"
           _GITHUB_TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=10.0)
           MAX_DIFF_CHARS = 60_000
+          # Output ceiling for the model call. 4096 truncated routine calls
+          # (infra-commons/legal#47): the pinned model reasons by default and those tokens
+          # are billed inside this same budget. Not raised further -- the SDK refuses a
+          # non-streaming call whose 3600 * max_tokens / 128_000 exceeds its 600s ceiling,
+          # about 21,300 tokens; past that the answer is streaming, not a bigger number.
+          MAX_OUTPUT_TOKENS = 16384
           # MID tier, matching infra-commons/security's adversarial gate
           # (.github/actions/adversarial-review/adversarial-review.py:57). Both gates merge
           # fleet-wide as required checks; this pin closes a full-generation split between
@@ -512,11 +518,42 @@ jobs:
               )
 
 
+          def _response_text(message) -> str:
+              """Concatenate the text blocks of an Anthropic response, in order.
+
+              `message.content` is a LIST and only some blocks carry text. The pinned
+              model reasons by default, so the FIRST block is routinely a reasoning block
+              with no `.text`: `content[0].text` raised AttributeError on every real PR
+              (infra-commons/legal#47), and those reasoning tokens are billed inside
+              MAX_OUTPUT_TOKENS too -- one root cause behind both of that issue's symptoms.
+
+              Filter on `block.type`, never the block's class: an unknown block type
+              deserialises into the FIRST member of the content union -- a text block --
+              carrying that type and no usable text, which isinstance() and hasattr()
+              accept and `type == "text"` does not. Raising rather than returning ""
+              keeps an unreadable response from reading as "no findings" downstream.
+              """
+              blocks = getattr(message, "content", None) or []
+              parts = [
+                  b.text
+                  for b in blocks
+                  if getattr(b, "type", None) == "text" and isinstance(getattr(b, "text", None), str)
+              ]
+              text = "\n".join(parts)
+              if not text.strip():
+                  seen = ", ".join(sorted({str(getattr(b, "type", "?")) for b in blocks})) or "none"
+                  raise RuntimeError(
+                      f"Anthropic response carried no readable text block (block types seen: "
+                      f"{seen}) -- refusing to read an unreadable response as a completed review."
+                  )
+              return text
+
+
           def run_review(api_key: str, diff: str, context: str, system_prompt: str) -> str:
               client = anthropic.Anthropic(api_key=api_key)
               message = client.messages.create(
                   model=MODEL,
-                  max_tokens=4096,
+                  max_tokens=MAX_OUTPUT_TOKENS,
                   # system_prompt is static per jurisdiction set (only ever extended by
                   # the appended suppression context, never shrunk) and comfortably
                   # clears the minimum cacheable prefix, so it's cacheable across
@@ -545,7 +582,7 @@ jobs:
                       f"({message.usage.output_tokens} output tokens) -- cannot treat a "
                       "partial legal review as complete."
                   )
-              return message.content[0].text
+              return _response_text(message)
 
 
           # Matches the CRITICAL section heading and captures it up to the next heading of
@@ -626,6 +663,27 @@ jobs:
                       continue
                   return True
               return False
+
+
+          # A comment body over 65,536 characters is rejected with a 422, which
+          # post_comment() raises on -- turning a CLEAN review into a red required
+          # check. Only reachable since MAX_OUTPUT_TOKENS rose; leaves header room.
+          MAX_COMMENT_CHARS = 60_000
+
+
+          def clamp_for_comment(review: str) -> str:
+              """Trim a review to what a comment body can hold.
+
+              Display only: has_critical_findings() runs on the FULL review text before
+              this is called, so a clamp can never change the merge verdict.
+              """
+              if len(review) <= MAX_COMMENT_CHARS:
+                  return review
+              return (
+                  review[:MAX_COMMENT_CHARS]
+                  + f"\n\n_[...review truncated for display at {MAX_COMMENT_CHARS} "
+                  "characters -- the full text is in the job log.]_"
+              )
 
 
           def set_github_output(name: str, value: str) -> None:
@@ -953,7 +1011,7 @@ jobs:
                   f"> **AI-generated legal review** -- not a substitute for qualified legal advice.\n"
                   f"> Findings indicate areas of potential risk; confirm with a lawyer before acting.\n"
                   f"> Commit: `{head_sha[:8]}` | Jurisdictions: `{jurisdictions}`\n\n"
-                  f"{review}\n\n"
+                  f"{clamp_for_comment(review)}\n\n"
                   f"---\n"
                   f"*Posted by the legal-review reusable workflow*"
               )

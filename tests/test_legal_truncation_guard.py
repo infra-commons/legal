@@ -24,6 +24,9 @@ how the modules are exec'd straight out of the shipped workflow YAML.
 from __future__ import annotations
 
 import pytest
+from anthropic.types import TextBlock, ThinkingBlock
+
+_UNSET = object()
 
 
 class _FakeUsage:
@@ -32,13 +35,17 @@ class _FakeUsage:
 
 
 class _FakeContentBlock:
-    def __init__(self, text: str):
+    # `type` is not decoration: the reviewers discriminate text blocks by it, and a
+    # double without one is a double that cannot reproduce infra-commons/legal#47.
+    def __init__(self, text: str, block_type: str = "text"):
         self.text = text
+        self.type = block_type
 
 
 class _FakeMessage:
-    def __init__(self, text: str, stop_reason: str, output_tokens: int = 4096):
-        self.content = [_FakeContentBlock(text)]
+    def __init__(self, text: str = "", stop_reason: str = "end_turn",
+                 output_tokens: int = 4096, blocks=_UNSET):
+        self.content = [_FakeContentBlock(text)] if blocks is _UNSET else blocks
         self.stop_reason = stop_reason
         self.usage = _FakeUsage(output_tokens)
 
@@ -105,6 +112,81 @@ def test_non_truncating_stop_reasons_do_not_raise(
     _install_fake_client(monkeypatch, mod, message)
 
     func("fake-api-key", "diff", "", "system prompt")  # must not raise
+
+
+# ── Block walking: infra-commons/legal#47 ───────────────────────────────────
+# All three reviewers read `message.content[0].text` and the pinned model puts a
+# reasoning block first, so every real PR crashed before a review was posted. These
+# build REAL SDK objects: the old double had `.text` and no `.type`, and passed
+# while production crashed.
+
+_HELPER_SITES = ["reviewer", "capture", "scan"]
+
+
+def _thinking(text: str = "") -> ThinkingBlock:
+    return ThinkingBlock(type="thinking", thinking=text, signature="sig")
+
+
+def _text(text: str) -> TextBlock:
+    return TextBlock(type="text", text=text)
+
+
+class _UnknownBlock:
+    """An unknown block type: the SDK yields a text block carrying that type and
+    no usable text, which isinstance() and hasattr() accept and `type` rejects."""
+    type = "future_block"
+    text = None
+
+
+@pytest.mark.parametrize("module", _HELPER_SITES)
+def test_a_reasoning_block_first_does_not_hide_the_text(module, request):
+    """The regression pin for infra-commons/legal#47."""
+    mod = request.getfixturevalue(module)
+    msg = _FakeMessage(blocks=[_thinking(), _text("## Legal findings")])
+    assert mod._response_text(msg) == "## Legal findings"
+
+
+@pytest.mark.parametrize("module", _HELPER_SITES)
+def test_text_blocks_are_concatenated_in_order(module, request):
+    mod = request.getfixturevalue(module)
+    msg = _FakeMessage(blocks=[_text("first"), _thinking(), _text("second")])
+    assert mod._response_text(msg) == "first\nsecond"
+
+
+@pytest.mark.parametrize(
+    "blocks",
+    [[_thinking()], [_UnknownBlock()], [_text("   ")], [], None],
+    ids=["reasoning-only", "unknown-block-type", "blank-text", "empty-content", "null-content"],
+)
+@pytest.mark.parametrize("module", _HELPER_SITES)
+def test_a_response_with_no_readable_text_raises(module, blocks, request):
+    """Fail closed, naming what came back. Returning "" would read as a clean
+    review to has_critical_findings() and as zero findings to the other two."""
+    mod = request.getfixturevalue(module)
+    with pytest.raises(RuntimeError, match="no readable text block"):
+        mod._response_text(_FakeMessage(blocks=blocks))
+
+
+@pytest.mark.parametrize("module,func_name", _CALL_SITES)
+def test_call_sites_survive_a_reasoning_block(module, func_name, request, monkeypatch):
+    mod = request.getfixturevalue(module)
+    _install_fake_client(monkeypatch, mod, _FakeMessage(
+        blocks=[_thinking(), _text('## Legal findings\n### CRITICAL\n_(None)_')]))
+    assert "Legal findings" in getattr(mod, func_name)("k", "diff", "", "system prompt")
+
+
+# ── The comment body cannot outgrow what a comment can hold ─────────────────
+
+def test_a_short_review_is_not_clamped(reviewer):
+    assert reviewer.clamp_for_comment("## Legal findings") == "## Legal findings"
+
+
+def test_an_oversized_review_is_clamped_and_says_so(reviewer):
+    """A body over 65,536 chars is a 422 post_comment() raises on -- an unclamped
+    clean review would block the PR it just cleared."""
+    clamped = reviewer.clamp_for_comment("x" * 200_000)
+    assert len(clamped) < 65_536
+    assert "truncated for display" in clamped
 
 
 def test_scan_module_execs_cleanly_from_its_workflow_heredoc(scan):

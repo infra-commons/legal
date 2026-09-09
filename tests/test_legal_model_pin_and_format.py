@@ -83,6 +83,29 @@ def test_all_three_reviewers_pin_the_same_current_model(fixture_name, request):
     assert mod.MODEL == "claude-sonnet-5"
 
 
+@pytest.mark.parametrize("fixture_name", ["reviewer", "capture", "scan"])
+def test_all_three_reviewers_use_the_same_output_budget(fixture_name, request):
+    """Same argument as the model pin above: the three must agree.
+
+    4096 truncated routine reviews (infra-commons/legal#47) -- the pinned model's
+    reasoning tokens are billed inside this budget. The ceiling is the SDK's, not
+    the model's: a non-streaming call above ~21,300 raises before it is sent.
+    """
+    assert request.getfixturevalue(fixture_name).MAX_OUTPUT_TOKENS == 16384
+
+
+@pytest.mark.parametrize(
+    "workflow_attr",
+    ["WORKFLOW", "CAPTURE_WORKFLOW", "SCAN_WORKFLOW"],
+)
+def test_the_old_output_ceiling_is_gone_from_every_call_site(workflow_attr):
+    """A partial revert must fail here rather than in a caller's required check."""
+    import conftest
+
+    src = conftest.extract_reviewer_source(getattr(conftest, workflow_attr))
+    assert "max_tokens=4096" not in src
+
+
 @pytest.mark.parametrize(
     "workflow_attr",
     ["WORKFLOW", "CAPTURE_WORKFLOW", "SCAN_WORKFLOW"],
