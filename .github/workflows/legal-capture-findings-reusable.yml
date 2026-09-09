@@ -167,6 +167,12 @@ jobs:
           REPO_LOCAL_SUPPRESSIONS_PATH = ".github/legal-review-suppressions.yml"
           MAX_SUPPRESSIONS_BYTES = 256_000  # bound runner memory on a hostile/huge file
           MAX_DIFF_CHARS = 60_000
+          # Output ceiling for the model call. 4096 truncated routine calls
+          # (infra-commons/legal#47): the pinned model reasons by default and those tokens
+          # are billed inside this same budget. Not raised further -- the SDK refuses a
+          # non-streaming call whose 3600 * max_tokens / 128_000 exceeds its 600s ceiling,
+          # about 21,300 tokens; past that the answer is streaming, not a bigger number.
+          MAX_OUTPUT_TOKENS = 16384
           # MID tier, matching infra-commons/security's adversarial gate
           # (.github/actions/adversarial-review/adversarial-review.py:57). Both gates merge
           # fleet-wide as required checks; this pin closes a full-generation split between
@@ -398,10 +404,44 @@ jobs:
 
           # ── LLM ────────────────────────────────────────────────────────────
 
+          def _response_text(message) -> str:
+              """Concatenate the text blocks of an Anthropic response, in order.
+
+              `message.content` is a LIST and only some blocks carry text. The pinned
+              model reasons by default, so the FIRST block is routinely a reasoning block
+              with no `.text`: `content[0].text` raised AttributeError on every real PR
+              (infra-commons/legal#47), and those reasoning tokens are billed inside
+              MAX_OUTPUT_TOKENS too -- one root cause behind both of that issue's symptoms.
+
+              Filter on `block.type`, never the block's class: an unknown block type
+              deserialises into the FIRST member of the content union -- a text block --
+              carrying that type and no usable text, which isinstance() and hasattr()
+              accept and `type == "text"` does not. Raising rather than returning ""
+              keeps an unreadable response from reading as "no findings" downstream.
+              """
+              blocks = getattr(message, "content", None) or []
+              parts = [
+                  b.text
+                  for b in blocks
+                  if getattr(b, "type", None) == "text" and isinstance(getattr(b, "text", None), str)
+              ]
+              text = "\n".join(parts)
+              if not text.strip():
+                  seen = ", ".join(sorted({str(getattr(b, "type", "?")) for b in blocks})) or "none"
+                  raise RuntimeError(
+                      f"Anthropic response carried no readable text block (block types seen: "
+                      f"{seen}) -- refusing to read an unreadable response as a completed review."
+                  )
+              return text
+
+
           def review_diff(api_key: str, diff: str, context: str, system_prompt: str) -> str:
               client = anthropic.Anthropic(
                   api_key=api_key,
-                  timeout=httpx.Timeout(connect=10.0, read=300.0, write=10.0, pool=10.0),
+                  # 600s, not 300s: an explicit timeout bypasses the SDK's own ceiling
+                  # check, and at MAX_OUTPUT_TOKENS a slow response can outlast 300s --
+                  # arriving as APITimeoutError, two silent retries and 3x the bill.
+                  timeout=httpx.Timeout(connect=10.0, read=600.0, write=10.0, pool=10.0),
               )
               safe_diff = diff.replace("</diff>", "&lt;/diff>")
               context_block = (
@@ -419,7 +459,7 @@ jobs:
               )
               msg = client.messages.create(
                   model=MODEL,
-                  max_tokens=4096,
+                  max_tokens=MAX_OUTPUT_TOKENS,
                   system=system_prompt,
                   messages=[{"role": "user", "content": user}],
               )
@@ -439,7 +479,7 @@ jobs:
                       f"({msg.usage.output_tokens} output tokens) -- cannot treat a "
                       "partial findings capture as complete."
                   )
-              return msg.content[0].text
+              return _response_text(msg)
 
 
           def parse_findings(text: str) -> list[dict]:
