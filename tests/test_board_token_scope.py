@@ -13,48 +13,58 @@ This test exists so a future edit to this step can't drop `permission-issues` ag
 """
 from pathlib import Path
 
+import pytest
 import yaml
 
 _ROOT = Path(__file__).resolve().parents[1]
-_WORKFLOW = _ROOT / ".github/workflows/legal-capture-findings-reusable.yml"
+# Every filer that carries the board block (infra-commons/meta#1656) mints the same token.
+_WORKFLOWS = [
+    _ROOT / ".github/workflows/legal-capture-findings-reusable.yml",
+    _ROOT / ".github/workflows/legal-codebase-scan-reusable.yml",
+]
+_each = pytest.mark.parametrize("workflow", _WORKFLOWS, ids=lambda p: p.stem)
 
 
-def _board_token_step():
-    jobs = yaml.safe_load(_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
+def _board_token_step(workflow):
+    jobs = yaml.safe_load(workflow.read_text(encoding="utf-8"))["jobs"]
     for job in jobs.values():
         for step in job.get("steps", []):
             if step.get("id") == "board-token":
                 return step
-    raise AssertionError("no step with id 'board-token' found in legal-capture-findings-reusable.yml")
+    raise AssertionError(f"no step with id 'board-token' found in {workflow.name}")
 
 
-def test_board_token_requests_organization_projects_write():
-    with_block = _board_token_step()["with"]
+@_each
+def test_board_token_requests_organization_projects_write(workflow):
+    with_block = _board_token_step(workflow)["with"]
     assert with_block.get("permission-organization-projects") == "write", (
         "the board-add mutation needs write access to the org Project"
     )
 
 
-def test_board_token_also_requests_issues_read():
+@_each
+def test_board_token_also_requests_issues_read(workflow):
     # The regression this test exists to catch: this key silently disappearing while
     # `permission-organization-projects` above stays intact.
-    with_block = _board_token_step()["with"]
+    with_block = _board_token_step(workflow)["with"]
     assert with_block.get("permission-issues") == "read", (
         "without this, addProjectV2ItemById cannot resolve the issue node it was just handed, "
         "and fails as NOT_FOUND indistinguishable from a genuinely absent node"
     )
 
 
-def test_board_token_step_is_guarded_and_never_fails_the_job():
+@_each
+def test_board_token_step_is_guarded_and_never_fails_the_job(workflow):
     # A secret this org hasn't provisioned yet must not touch the job's outcome — see the
     # optional `INFRA_COMMONS_BOT_PRIVATE_KEY` secret and BOARD_APP_KEY env guard above it.
-    step = _board_token_step()
+    step = _board_token_step(workflow)
     assert step.get("if") == "${{ env.BOARD_APP_KEY != '' }}"
     assert step.get("continue-on-error") is True
 
 
-def test_the_secret_stays_optional():
-    doc = yaml.safe_load(_WORKFLOW.read_text(encoding="utf-8"))
+@_each
+def test_the_secret_stays_optional(workflow):
+    doc = yaml.safe_load(workflow.read_text(encoding="utf-8"))
     # PyYAML parses the bare `on:` key as the boolean True (YAML 1.1's on/off/yes/no resolver),
     # not the string "on" -- this is not a typo.
     secrets = doc[True]["workflow_call"]["secrets"]

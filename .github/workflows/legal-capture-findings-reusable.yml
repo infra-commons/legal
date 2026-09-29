@@ -23,7 +23,7 @@ name: Capture legal findings (reusable)
 #       secrets:
 #         ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 #         # Optional (infra-commons/meta#661) — omit entirely until this org has provisioned the
-#         # secret; a newly-filed HIGH just won't be board-added, nothing else changes:
+#         # secret; filed issues then stay off the board (each one warns), nothing else changes:
 #         INFRA_COMMONS_BOT_PRIVATE_KEY: ${{ secrets.INFRA_COMMONS_BOT_PRIVATE_KEY }}
 #
 # The caller workflow must grant:
@@ -47,8 +47,9 @@ on:
       INFRA_COMMONS_BOT_PRIVATE_KEY:
         description: >-
           Optional. The infra-commons-bot App's private key, forwarded by the caller so a newly
-          filed HIGH finding can be added to the org's board Inbox (infra-commons/meta#661). Not
-          required — omitted or empty, board-add is skipped and everything else is unaffected.
+          filed issue can be added to the org's board Inbox (infra-commons/meta#661, #1656). Not
+          required — omitted or empty, board-add is skipped with a run warning per issue and
+          everything else is unaffected.
         required: false
 
 jobs:
@@ -124,6 +125,7 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           JURISDICTIONS: ${{ inputs.jurisdictions }}
           BOARD_APP_TOKEN: ${{ steps.board-token.outputs.token }}
+          BOARD_KEY_FORWARDED: ${{ env.BOARD_APP_KEY != '' }}
         run: |
           python3 << 'PYEOF'
           """
@@ -840,27 +842,33 @@ jobs:
                   return resp.json()
 
 
+          # Every severity this script files as an individual issue gets a board-add attempt
+          # (infra-commons/meta#1656). #661 first scoped this to HIGH on the reasoning that a
+          # CRITICAL already fails the job below -- but a red run is not a card: once it is
+          # rerun or scrolled past, the only durable record is the issue, and an issue off the
+          # board is invisible to the console. Pinned equal to the filed set by a test.
+          BOARD_ADD_SEVERITIES = {"CRITICAL", "HIGH"}
+
+
           # ── Board intake (Projects v2) ────────────────────────────────────
           #
-          # A newly-filed HIGH finding lands on the repo's issue list only -- never on the org's
-          # GitHub Project board -- so it's invisible to the console's Inbox->Doing drain
-          # (infra-commons/meta#661). `GITHUB_TOKEN` (this module's own REST credential above)
-          # cannot fix that: org-level Projects v2 mutations need an App installation token
-          # carrying `organization_projects`, which no `permissions:` block can grant to the
-          # default Actions token. The caller (reusable workflow) mints one separately via
-          # `actions/create-github-app-token` and hands it to this module only as
-          # `BOARD_APP_TOKEN` -- a distinct, narrower-scoped credential from `token` above, used
-          # for nothing but this section.
+          # An issue filed here lands on the repo's issue list only -- never on the org's GitHub
+          # Project board -- so it's invisible to the console's Inbox->Doing drain
+          # (infra-commons/meta#661, #1656). The filing credential cannot fix that: org-level
+          # Projects v2 mutations need an App installation token carrying `organization_projects`,
+          # which no `permissions:` block can grant to the default Actions token. The reusable mints
+          # one separately via `actions/create-github-app-token` and hands it in only as
+          # `BOARD_APP_TOKEN` -- a distinct, narrower-scoped credential used for nothing but this
+          # section.
           #
-          # Every function below returns/degrades rather than raises: a board-add is a
-          # nice-to-have on top of a successful capture, never a precondition for one. Absent/
-          # wrong-shaped input, a missing field, a GraphQL error -- all are just a reason string a
-          # caller logs and moves on from.
-
-          # Only HIGH gets a board-add attempt. CRITICAL already blocks the merge via the exit-1
-          # gate at the end of main() (a board card adds little on top of that); MEDIUM/LOW roll
-          # into the advisory-only path, not individual issues, so there's no single issue to add.
-          BOARD_ADD_SEVERITIES = {"HIGH"}
+          # This block is byte-identical in every filer in this repo (legal-capture-findings,
+          # legal-codebase-scan, annual-review, quarterly-review); tests/test_board_intake.py fails
+          # if one copy drifts. It is self-contained on purpose: no helper from outside it.
+          #
+          # Every function below returns/degrades rather than raises: the issue is always filed
+          # first, and a board-add is never a precondition for it. But a failed or skipped add is
+          # never quiet either -- `report_board` turns each one into a `::warning` annotation, so an
+          # issue that stayed off the board says so on the run summary.
 
           # Mirrors sharedinfra's scripts/projects_topology.py (the control-plane's own copy of
           # the same fact) and infra-commons/security's capture.py -- kept in sync by hand. Five
@@ -874,6 +882,7 @@ jobs:
           }
 
           _GRAPHQL_URL = "https://api.github.com/graphql"
+          _BOARD_TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=10.0)
 
           _BOARD_FIELDS_Q = """
           query($owner: String!, $number: Int!) {
@@ -913,10 +922,15 @@ jobs:
           def _board_graphql(token: str, query: str, variables: dict) -> dict | None:
               """POST one GraphQL query/mutation; return `data`, or None on any failure (logged, never raised)."""
               try:
-                  with httpx.Client(timeout=_TIMEOUT) as client:
+                  with httpx.Client(timeout=_BOARD_TIMEOUT) as client:
                       resp = client.post(
                           _GRAPHQL_URL,
-                          headers=_headers(token) | {"Content-Type": "application/json"},
+                          headers={
+                              "Authorization": f"Bearer {token}",
+                              "Accept": "application/vnd.github+json",
+                              "X-GitHub-Api-Version": "2022-11-28",
+                              "Content-Type": "application/json",
+                          },
                           json={"query": query, "variables": variables},
                       )
                   payload = resp.json()
@@ -982,6 +996,39 @@ jobs:
               return True, "added to board Inbox"
 
 
+          def report_board(board_token: str, key_forwarded: bool, owner: str, issue: dict) -> bool:
+              """Board-add one just-filed issue and say what happened. Never raises.
+
+              Every outcome but success is a `::warning` annotation naming the issue, so an issue
+              left off the board is visible on the run summary rather than one log line among many.
+              "Caller did not forward the key" and "key forwarded but the token didn't mint" are
+              kept apart: the first is a caller-side wiring gap, the second a broken App install.
+              """
+              ref = f"#{issue.get('number', '?')}"
+              if not board_token:
+                  why = (
+                      "INFRA_COMMONS_BOT_PRIVATE_KEY was forwarded but the App token did not mint "
+                      "(App not installed in this org, or key revoked) -- see the board-token step"
+                      if key_forwarded else
+                      "the caller does not forward INFRA_COMMONS_BOT_PRIVATE_KEY to this reusable"
+                  )
+              else:
+                  try:
+                      node_id = issue.get("node_id", "")
+                      ok, why = add_to_board(board_token, owner, node_id) if node_id else (
+                          False, "created issue response had no node_id"
+                      )
+                  except Exception as exc:  # noqa: BLE001 -- a board-add bug must never sink filing
+                      ok, why = False, f"unexpected error: {exc}"
+                  if ok:
+                      print(f"  board: {ref} {why}")
+                      return True
+              print(f"::warning title=board intake::issue {ref} filed but NOT on the {owner} board: {why}")
+              return False
+
+          # ── End board intake ──────────────────────────────────────────────
+
+
           def issue_title(finding: dict) -> str:
               return (
                   f"[Legal][legal-ai][{finding['severity']}] "
@@ -1021,6 +1068,7 @@ jobs:
               run_url  = os.environ.get("RUN_URL", "")
               jurisdictions = os.environ.get("JURISDICTIONS", "NZ,AU")
               board_token = os.environ.get("BOARD_APP_TOKEN", "")
+              board_key_forwarded = os.environ.get("BOARD_KEY_FORWARDED", "") == "true"
               board_owner = repo.split("/", 1)[0] if repo else ""
 
               missing = [k for k, v in {
@@ -1116,17 +1164,7 @@ jobs:
                   if sev == "CRITICAL":
                       criticals_new += 1
                   if sev in BOARD_ADD_SEVERITIES:
-                      if not board_token:
-                          print("  board: skipped — no BOARD_APP_TOKEN (org not yet provisioned)")
-                      else:
-                          try:
-                              node_id = created_issue.get("node_id", "")
-                              ok, msg = add_to_board(board_token, board_owner, node_id) if node_id else (
-                                  False, "created issue response had no node_id"
-                              )
-                          except Exception as exc:  # noqa: BLE001 -- a board-add bug must never sink capture
-                              ok, msg = False, f"unexpected error: {exc}"
-                          print(f"  board: {msg}" if ok else f"  board: skipped — {msg}")
+                      report_board(board_token, board_key_forwarded, board_owner, created_issue)
                   time.sleep(1)
 
               criticals_total = criticals_new + criticals_already_tracked

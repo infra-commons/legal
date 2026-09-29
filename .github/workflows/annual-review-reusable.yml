@@ -14,6 +14,9 @@ name: Annual Legal Review (reusable)
 #       uses: infra-commons/legal/.github/workflows/annual-review-reusable.yml@main
 #       with:
 #         jurisdictions: 'NZ,AU'   # or 'NZ,JP' for KLS Japan
+#       secrets:
+#         # Optional (infra-commons/meta#1656) — puts the issue on the org board at Inbox:
+#         INFRA_COMMONS_BOT_PRIVATE_KEY: ${{ secrets.INFRA_COMMONS_BOT_PRIVATE_KEY }}
 
 permissions: {}
 
@@ -25,21 +28,33 @@ on:
         required: false
         default: 'NZ,AU'
         type: string
+    secrets:
+      INFRA_COMMONS_BOT_PRIVATE_KEY:
+        description: >-
+          Optional. The infra-commons-bot App's private key, forwarded by the caller so the
+          review issue is added to the org's board Inbox (infra-commons/meta#1656). Omitted or
+          empty, the issue is still opened and the run warns that it is off the board.
+        required: false
 
 jobs:
   open-review-issue:
     runs-on: ubuntu-latest
     permissions:
       issues: write
+    env:
+      # A step `if:` cannot read `secrets`, but it can read job-level `env`
+      # (infra-commons/security#90) -- same guard as the capture reusable.
+      BOARD_APP_KEY: ${{ secrets.INFRA_COMMONS_BOT_PRIVATE_KEY }}
     steps:
       - name: Open annual review issue
+        id: create
         uses: actions/github-script@v9
         env:
           JURISDICTIONS: ${{ inputs.jurisdictions }}
         with:
           script: |
             const jurisdictions = process.env.JURISDICTIONS || 'NZ,AU';
-            await github.rest.issues.create({
+            const issue = await github.rest.issues.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
               title: `Annual legal review — ${new Date().getFullYear()}`,
@@ -65,3 +80,237 @@ jobs:
                 '- Close this issue when all items are checked',
               ].join('\n'),
             });
+            core.setOutput('number', String(issue.data.number));
+            core.setOutput('node_id', issue.data.node_id);
+
+      # Board-add (infra-commons/meta#1656). Same token step and same board block as
+      # legal-capture-findings-reusable.yml -- see the comments there. The issue above is
+      # already filed by the time anything below runs, and every step below is
+      # continue-on-error, so no board failure can turn a filed reminder into a red job
+      # without a record: a miss is a `::warning` naming the issue.
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: board-token
+        if: ${{ env.BOARD_APP_KEY != '' }}
+        continue-on-error: true
+        with:
+          client-id: Iv23liH9thgSIViTxbMV # gitleaks:allow
+          private-key: ${{ secrets.INFRA_COMMONS_BOT_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-organization-projects: write
+          permission-issues: read
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v6
+        continue-on-error: true
+        with:
+          python-version: "3.12"
+
+      - name: Add review issue to board
+        continue-on-error: true
+        env:
+          BOARD_APP_TOKEN: ${{ steps.board-token.outputs.token }}
+          BOARD_KEY_FORWARDED: ${{ env.BOARD_APP_KEY != '' }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ steps.create.outputs.number }}
+          ISSUE_NODE_ID: ${{ steps.create.outputs.node_id }}
+        run: |
+          pip install --quiet httpx==0.28.1
+          python3 << 'PYEOF'
+          import os
+          import sys
+
+          import httpx
+
+
+          # ── Board intake (Projects v2) ────────────────────────────────────
+          #
+          # An issue filed here lands on the repo's issue list only -- never on the org's GitHub
+          # Project board -- so it's invisible to the console's Inbox->Doing drain
+          # (infra-commons/meta#661, #1656). The filing credential cannot fix that: org-level
+          # Projects v2 mutations need an App installation token carrying `organization_projects`,
+          # which no `permissions:` block can grant to the default Actions token. The reusable mints
+          # one separately via `actions/create-github-app-token` and hands it in only as
+          # `BOARD_APP_TOKEN` -- a distinct, narrower-scoped credential used for nothing but this
+          # section.
+          #
+          # This block is byte-identical in every filer in this repo (legal-capture-findings,
+          # legal-codebase-scan, annual-review, quarterly-review); tests/test_board_intake.py fails
+          # if one copy drifts. It is self-contained on purpose: no helper from outside it.
+          #
+          # Every function below returns/degrades rather than raises: the issue is always filed
+          # first, and a board-add is never a precondition for it. But a failed or skipped add is
+          # never quiet either -- `report_board` turns each one into a `::warning` annotation, so an
+          # issue that stayed off the board says so on the run summary.
+
+          # Mirrors sharedinfra's scripts/projects_topology.py (the control-plane's own copy of
+          # the same fact) and infra-commons/security's capture.py -- kept in sync by hand. Five
+          # entries, changes rarely; not worth a cross-repo fetch for.
+          OWNER_PROJECT_NUMBER: dict[str, int] = {
+              "infra-commons": 1,
+              "rolliq-com": 5,
+              "cashbucket-com": 1,
+              "klsjapan-com": 1,
+              "chargingblindly-com": 1,
+          }
+
+          _GRAPHQL_URL = "https://api.github.com/graphql"
+          _BOARD_TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=10.0)
+
+          _BOARD_FIELDS_Q = """
+          query($owner: String!, $number: Int!) {
+            repositoryOwner(login: $owner) {
+              ... on ProjectV2Owner {
+                projectV2(number: $number) {
+                  id
+                  closed
+                  fields(first: 50) {
+                    nodes {
+                      __typename
+                      ... on ProjectV2SingleSelectField { id name options { id name } }
+                    }
+                  }
+                }
+              }
+            }
+          }
+          """
+
+          _ADD_ITEM_M = """
+          mutation($project: ID!, $content: ID!) {
+            addProjectV2ItemById(input: { projectId: $project, contentId: $content }) { item { id } }
+          }
+          """
+
+          _SET_STATUS_M = """
+          mutation($project: ID!, $item: ID!, $field: ID!, $option: String!) {
+            updateProjectV2ItemFieldValue(input: {
+              projectId: $project, itemId: $item, fieldId: $field,
+              value: { singleSelectOptionId: $option }
+            }) { projectV2Item { id } }
+          }
+          """
+
+
+          def _board_graphql(token: str, query: str, variables: dict) -> dict | None:
+              """POST one GraphQL query/mutation; return `data`, or None on any failure (logged, never raised)."""
+              try:
+                  with httpx.Client(timeout=_BOARD_TIMEOUT) as client:
+                      resp = client.post(
+                          _GRAPHQL_URL,
+                          headers={
+                              "Authorization": f"Bearer {token}",
+                              "Accept": "application/vnd.github+json",
+                              "X-GitHub-Api-Version": "2022-11-28",
+                              "Content-Type": "application/json",
+                          },
+                          json={"query": query, "variables": variables},
+                      )
+                  payload = resp.json()
+              except Exception as exc:
+                  print(f"  board: graphql request failed: {exc}", file=sys.stderr)
+                  return None
+              if resp.status_code != 200 or payload.get("errors"):
+                  detail = payload.get("errors") or f"HTTP {resp.status_code}"
+                  print(f"  board: graphql error: {str(detail)[:300]}", file=sys.stderr)
+                  return None
+              return payload.get("data")
+
+
+          def add_to_board(token: str, owner: str, issue_node_id: str) -> tuple[bool, str]:
+              """Add `issue_node_id` to `owner`'s org Project and set Status = Inbox.
+
+              Returns (ok, message) -- `message` is a human-readable reason on failure, or a short
+              success note. Never raises: every failure path here is something a caller logs and
+              continues past.
+              """
+              number = OWNER_PROJECT_NUMBER.get(owner)
+              if number is None:
+                  return False, f"owner {owner!r} not in the board topology table"
+
+              data = _board_graphql(token, _BOARD_FIELDS_Q, {"owner": owner, "number": number})
+              proj = ((data or {}).get("repositoryOwner") or {}).get("projectV2")
+              if not proj:
+                  return False, f"could not read project #{number} field map for {owner!r}"
+              if proj.get("closed"):
+                  return False, f"project #{number} for {owner!r} is closed"
+
+              status_field = next(
+                  (n for n in proj["fields"]["nodes"] if n and n.get("name") == "Status"), None
+              )
+              if not status_field:
+                  return False, f"no Status field on {owner!r}'s project"
+              inbox_option = next(
+                  (o["id"] for o in status_field.get("options", []) if o["name"] == "Inbox"), None
+              )
+              if inbox_option is None:
+                  return False, f"no Inbox option on {owner!r}'s Status field"
+
+              project_id = proj["id"]
+              add_data = _board_graphql(
+                  token, _ADD_ITEM_M, {"project": project_id, "content": issue_node_id}
+              )
+              item = (add_data or {}).get("addProjectV2ItemById", {}).get("item")
+              if not item:
+                  return False, "addProjectV2ItemById failed"
+
+              set_data = _board_graphql(
+                  token,
+                  _SET_STATUS_M,
+                  {
+                      "project": project_id,
+                      "item": item["id"],
+                      "field": status_field["id"],
+                      "option": inbox_option,
+                  },
+              )
+              if set_data is None:
+                  return False, "added to board but failed to set Status = Inbox"
+              return True, "added to board Inbox"
+
+
+          def report_board(board_token: str, key_forwarded: bool, owner: str, issue: dict) -> bool:
+              """Board-add one just-filed issue and say what happened. Never raises.
+
+              Every outcome but success is a `::warning` annotation naming the issue, so an issue
+              left off the board is visible on the run summary rather than one log line among many.
+              "Caller did not forward the key" and "key forwarded but the token didn't mint" are
+              kept apart: the first is a caller-side wiring gap, the second a broken App install.
+              """
+              ref = f"#{issue.get('number', '?')}"
+              if not board_token:
+                  why = (
+                      "INFRA_COMMONS_BOT_PRIVATE_KEY was forwarded but the App token did not mint "
+                      "(App not installed in this org, or key revoked) -- see the board-token step"
+                      if key_forwarded else
+                      "the caller does not forward INFRA_COMMONS_BOT_PRIVATE_KEY to this reusable"
+                  )
+              else:
+                  try:
+                      node_id = issue.get("node_id", "")
+                      ok, why = add_to_board(board_token, owner, node_id) if node_id else (
+                          False, "created issue response had no node_id"
+                      )
+                  except Exception as exc:  # noqa: BLE001 -- a board-add bug must never sink filing
+                      ok, why = False, f"unexpected error: {exc}"
+                  if ok:
+                      print(f"  board: {ref} {why}")
+                      return True
+              print(f"::warning title=board intake::issue {ref} filed but NOT on the {owner} board: {why}")
+              return False
+
+          # ── End board intake ──────────────────────────────────────────────
+
+
+          def main() -> None:
+              issue = {"number": os.environ["ISSUE_NUMBER"], "node_id": os.environ["ISSUE_NODE_ID"]}
+              report_board(
+                  os.environ.get("BOARD_APP_TOKEN", ""),
+                  os.environ.get("BOARD_KEY_FORWARDED", "") == "true",
+                  os.environ["REPO"].split("/", 1)[0],
+                  issue,
+              )
+
+
+          if __name__ == "__main__":
+              main()
+          PYEOF
