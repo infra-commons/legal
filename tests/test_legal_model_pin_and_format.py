@@ -18,7 +18,7 @@ difference is direction: those resurface findings noisily, this one drops them
 silently, on a check that is REQUIRED on caller repos.
 
 None of these tests make a live model call, and none of them can tell you what
-claude-sonnet-5 actually emits. What they pin is that drift fails loudly instead
+the pinned model (claude-sonnet-5-5 since infra-commons/meta#1664) actually emits. What they pin is that drift fails loudly instead
 of silently -- which is the property that makes the next pin move safe too.
 """
 from __future__ import annotations
@@ -80,7 +80,7 @@ def test_all_three_reviewers_pin_the_same_current_model(fixture_name, request):
     about the same diff.
     """
     mod = request.getfixturevalue(fixture_name)
-    assert mod.MODEL == "claude-sonnet-5"
+    assert mod.MODEL == "claude-sonnet-5-5"
 
 
 @pytest.mark.parametrize("fixture_name", ["reviewer", "capture", "scan"])
@@ -114,8 +114,9 @@ def test_the_old_output_ceiling_is_gone_from_every_call_site(workflow_attr):
 def test_no_sampling_or_thinking_params_at_the_call_sites(workflow_attr, banned):
     """The request shape must stay within what current models accept.
 
-    claude-sonnet-5 rejects `temperature`, `top_p`, `top_k` and
-    `thinking.budget_tokens` with a 400, and rejects assistant prefill. All three
+    claude-sonnet-5-5 (like claude-sonnet-5 before it) rejects non-default
+    `temperature`, `top_p`, `top_k` and `thinking.budget_tokens` with a 400,
+    rejects `thinking: {type: "disabled"}`, and rejects assistant prefill. All three
     call sites pass only model/max_tokens/system/messages, which is why this swap
     needed no request-shape change -- but a later edit adding `temperature=0`
     "for determinism" would 400 every legal gate in the fleet at once, at

@@ -114,6 +114,46 @@ def test_non_truncating_stop_reasons_do_not_raise(
     func("fake-api-key", "diff", "", "system prompt")  # must not raise
 
 
+# ── Refusals: infra-commons/meta#1664 ───────────────────────────────────────
+# claude-sonnet-5-5 declines in more safety-classifier categories than
+# claude-sonnet-5, as HTTP 200 + stop_reason "refusal". A decline with no text
+# already raised in _response_text; a decline carrying PARTIAL text did not, and
+# a half-written review with no CRITICAL heading yet parses as clean.
+
+@pytest.mark.parametrize("module,func_name", _CALL_SITES)
+def test_refusal_with_partial_text_raises(module, func_name, request, monkeypatch):
+    mod = request.getfixturevalue(module)
+    func = getattr(mod, func_name)
+    message = _FakeMessage(
+        text="## Legal findings\n### HIGH -- serious risk\n- [a.py:1] Partial",
+        stop_reason="refusal",
+    )
+    message.stop_details = {"type": "refusal", "category": "general_harms"}
+    _install_fake_client(monkeypatch, mod, message)
+
+    with pytest.raises(RuntimeError, match="category=general_harms"):
+        func("fake-api-key", "diff", "", "system prompt")
+
+
+@pytest.mark.parametrize("module", ["reviewer", "capture", "scan"])
+@pytest.mark.parametrize(
+    "details,expected",
+    [
+        (None, "unknown"),
+        ({"type": "refusal", "category": None}, "unknown"),
+        ({"type": "refusal", "category": "cyber"}, "cyber"),
+        (type("D", (), {"category": "bio"})(), "bio"),
+    ],
+    ids=["absent", "null-category", "dict", "object"],
+)
+def test_refusal_category_never_masks_the_refusal(module, details, expected, request):
+    mod = request.getfixturevalue(module)
+    message = _FakeMessage(stop_reason="refusal")
+    if details is not None:
+        message.stop_details = details
+    assert mod._refusal_category(message) == expected
+
+
 # ── Block walking: infra-commons/legal#47 ───────────────────────────────────
 # All three reviewers read `message.content[0].text` and the pinned model puts a
 # reasoning block first, so every real PR crashed before a review was posted. These
