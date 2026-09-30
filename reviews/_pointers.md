@@ -25,6 +25,10 @@ Tier 2 (control-plane repos) will be added here per-repo if/when that tier start
 — `infra-commons/meta#1188`. Measures what the path filter can and cannot decide (it skipped a
 consent gate, a spend cap and a post-delivery read in one caller's four-PR series), rules out both
 widening the token list and matching diff content, and records the caller inputs shipped instead.
+[2026-09-30-cashbucket-legal-convergence.md](2026-09-30-cashbucket-legal-convergence.md) —
+`cashbucket-com/marketing#228`. The `extra_review_rules` input, its conditional fifth severity
+class (a console decision, with a one-line revert), and the handoff for the fleet's last bespoke
+PR-time legal reviewer to converge.
 
 **Not covered by this pass:** `security`, `devops` — out of scope per meta#815 (tracked in their own
 repos' `reviews/_pointers.md`; see `infra-commons/security`'s for the `adversarial-review` and

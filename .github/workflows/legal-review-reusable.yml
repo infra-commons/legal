@@ -52,6 +52,23 @@ name: Legal review (reusable)
 # `extra_surface_paths` is the weaker, second lever: a caller-owned list of its own legally-loaded
 # paths. It is honest about being a path list — it goes stale the moment a NEW file implements a
 # control — but the caller at least knows which of its own files those are.
+#
+# `extra_review_rules` is the caller's own regulatory surface, in prose: its organisation and
+# product, the laws that bind it beyond the built-in jurisdiction list, and its content rules.
+# The built-in prompt describes one company; a caller that is not that company should say what it
+# is here (or in an AGENTS.md, which lands in <repo_context>). Unset, the prompt is byte-for-byte
+# what it was before this input existed. Set, it adds a "Caller-specific context and rules" block
+# after the law list, and one more CRITICAL/HIGH class to the severity rubric: a breach those rules
+# themselves name as CRITICAL or HIGH. That is the lever for a regime the built-in rubric's four
+# classes do not reach (e.g. a financial-advice boundary). The text is caller configuration, read
+# from the caller's workflow on the PR head — the same trust as every other input here.
+#
+#   with:
+#     jurisdictions: 'NZ,AU'
+#     extra_surface_paths: 'brand,article,newsletter'
+#     extra_review_rules: |
+#       Context: <who the caller is and what it ships>.
+#       - <Act and section>: <what counts as a breach>. Score CRITICAL when <...>.
 
 permissions: {}
 
@@ -76,6 +93,14 @@ on:
           Comma-separated extra path substrings this caller counts as legal surface, matched
           exactly as the built-in tokens are. Additive only; it can never make the filter skip
           something it would otherwise review.
+        required: false
+        default: ''
+        type: string
+      extra_review_rules:
+        description: >-
+          Caller-specific context and legal rules, as prose, added to the reviewer's system prompt.
+          Empty leaves the prompt unchanged. Rules may name further CRITICAL/HIGH classes -- see
+          the header note.
         required: false
         default: ''
         type: string
@@ -121,6 +146,7 @@ jobs:
           JURISDICTIONS: ${{ inputs.jurisdictions }}
           FORCE_REVIEW: ${{ inputs.force }}
           EXTRA_SURFACE_PATHS: ${{ inputs.extra_surface_paths }}
+          EXTRA_REVIEW_RULES: ${{ inputs.extra_review_rules }}
         run: |
           python3 << 'PYEOF'
           """
@@ -135,7 +161,9 @@ jobs:
           Optional env vars: JURISDICTIONS (default: NZ,AU),
                              FORCE_REVIEW (default: false -- review regardless of the
                              path filter), EXTRA_SURFACE_PATHS (default: empty --
-                             comma-separated caller-supplied surface substrings)
+                             comma-separated caller-supplied surface substrings),
+                             EXTRA_REVIEW_RULES (default: empty -- caller-specific
+                             context and rules for the system prompt)
           """
           import os
           import re
@@ -348,7 +376,48 @@ jobs:
           """
 
 
-          def _build_system_prompt(jurisdictions_str: str) -> str:
+          # Caller-rules size ceiling. Over it the review FAILS rather than truncating: a
+          # truncated rule set reviews under half the caller's rules and reads as clean.
+          MAX_EXTRA_RULES_CHARS = 16_000
+
+          # Anchor for the conditional fifth severity class. Asserted present exactly
+          # once, so a rewording of the rubric fails loudly instead of silently dropping
+          # a caller's CRITICAL/HIGH class.
+          _RUBRIC_ANCHOR = "or (a)/(b) reachable but not yet\noccurring.\n"
+
+          _CALLER_RULES_BLOCK = """
+
+          Caller-specific context and rules. The calling repository supplies the block below as
+          its own configuration; it is not part of the diff. Where it describes the organisation,
+          its product or its customers, it supersedes the Context paragraph above. Its laws and
+          rules apply in addition to the list above.
+          <caller_rules>
+          %%CALLER_RULES%%
+          </caller_rules>"""
+
+          _CALLER_SEVERITY_CLASS = (
+              "Notwithstanding \"exactly four\" above, for this repository a fifth class qualifies:\n"
+              "  (e) a breach that <caller_rules> itself names as CRITICAL or HIGH, occurring now\n"
+              "      in the diff -- score it at the severity <caller_rules> names.\n"
+          )
+
+
+          def parse_extra_review_rules(raw: str) -> str:
+              """Caller-supplied prompt rules, or "" when the caller passed none.
+
+              Whitespace-only is "none", so a stray newline in a caller's `with:` cannot
+              switch on the caller block and the fifth severity class with nothing in it.
+              """
+              rules = raw.strip()
+              if len(rules) > MAX_EXTRA_RULES_CHARS:
+                  raise ValueError(
+                      f"extra_review_rules is {len(rules)} chars; the ceiling is "
+                      f"{MAX_EXTRA_RULES_CHARS}. Refusing to truncate a caller's rules."
+                  )
+              return rules
+
+
+          def _build_system_prompt(jurisdictions_str: str, extra_rules: str = "") -> str:
               jurs = [j.strip().upper() for j in jurisdictions_str.split(",") if j.strip()]
               law_parts = []
               for jur in jurs:
@@ -356,7 +425,17 @@ jobs:
                       law_parts.append(_JURISDICTION_LAWS[jur])
               law_parts.append(_COMMON_LAW)
               law_section = "\n          ".join(law_parts)
-              return _SYSTEM_PROMPT_TEMPLATE.replace("%%LAW_SECTION%%", law_section)
+              rules = extra_rules.strip()
+              if not rules:
+                  return _SYSTEM_PROMPT_TEMPLATE.replace("%%LAW_SECTION%%", law_section)
+              # Opt-in only. Everything below is unreachable for a caller that passes
+              # nothing, which is what keeps every existing caller's prompt byte-identical.
+              template = _SYSTEM_PROMPT_TEMPLATE
+              if template.count(_RUBRIC_ANCHOR) != 1:
+                  raise RuntimeError("severity rubric anchor not found exactly once")
+              template = template.replace(_RUBRIC_ANCHOR, _RUBRIC_ANCHOR + _CALLER_SEVERITY_CLASS)
+              block = _CALLER_RULES_BLOCK.replace("%%CALLER_RULES%%", rules)
+              return template.replace("%%LAW_SECTION%%", law_section + block)
 
 
           def get_diff(base_sha: str, head_sha: str) -> str:
@@ -929,6 +1008,7 @@ jobs:
               jurisdictions = os.environ.get("JURISDICTIONS", "NZ,AU")
               force = parse_force(os.environ.get("FORCE_REVIEW", ""))
               extra_surface = parse_extra_surface_paths(os.environ.get("EXTRA_SURFACE_PATHS", ""))
+              extra_rules = parse_extra_review_rules(os.environ.get("EXTRA_REVIEW_RULES", ""))
 
               if not api_key:
                   print("ANTHROPIC_API_KEY not set -- skipping legal review.", file=sys.stderr)
@@ -992,7 +1072,12 @@ jobs:
               suppressions = load_suppressions(token, repo)
               if suppressions:
                   print(f"  Loaded {len(suppressions)} legal-review-suppression(s)")
-              system_prompt = _build_system_prompt(jurisdictions) + build_suppression_context(suppressions)
+              if extra_rules:
+                  print(f"Applying caller-specific review rules ({len(extra_rules)} chars).")
+              system_prompt = (
+                  _build_system_prompt(jurisdictions, extra_rules)
+                  + build_suppression_context(suppressions)
+              )
               print(f"Running legal review (model={MODEL}, diff={len(diff)} chars, jurisdictions={jurisdictions}) ...")
               review = run_review(api_key, diff, context, system_prompt)
 
@@ -1001,6 +1086,7 @@ jobs:
               write_step_summary(
                   "### Legal review RAN\n\n"
                   f"Reviewed {len(changed)} changed file(s) with `{MODEL}`. "
+                  + ("Caller-specific review rules applied. " if extra_rules else "")
                   + ("**CRITICAL findings present** -- see the PR comment."
                      if critical else "No CRITICAL findings.")
               )

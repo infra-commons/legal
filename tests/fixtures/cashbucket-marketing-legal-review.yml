@@ -1,0 +1,77 @@
+# Paste-ready caller for cashbucket-com/marketing's `.github/workflows/legal-review.yml`,
+# replacing the bespoke cbtools/legal_reviewer.py gate (cashbucket-com/marketing#228).
+#
+# It lives HERE, as a test fixture, so the tests pin the exact text that caller will adopt:
+# tests/test_legal_caller_rules.py asserts its surface reviews everything the bespoke gate
+# reviewed and that its rules reach the reviewer's prompt. Nothing in it is a default of the
+# canonical reusable. See reviews/2026-09-30-cashbucket-legal-convergence.md.
+#
+# `extra_surface_paths` is cbtools/legal_reviewer.py's LEGAL_SURFACE_TOKENS, verbatim, at
+# cashbucket-com/marketing@dfc5354. `extra_review_rules` is that file's SYSTEM_PROMPT minus
+# the JSON output contract (the canonical reviewer has its own format) with the same laws,
+# severity examples, content rules and scope boundaries.
+name: Legal Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+concurrency:
+  group: legal-review-${{ github.event.number }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  legal-review:
+    uses: infra-commons/legal/.github/workflows/legal-review-reusable.yml@legal-review/v1
+    with:
+      jurisdictions: 'NZ,AU'
+      extra_surface_paths: >-
+        brand,article,messaging,draft,brief,topic,social,campaign,newsletter,welcome,prompt,
+        publish,cbtools,engine,template,crm,worker,dashboard,contact,credential,schema,
+        personal,pii,oauth,xero,legal,licen,policy,policies,privacy,terms,consent,cookie,
+        retention,disclaimer,copyright,trademark,compliance,contract,agreement,subprocessor,
+        constitution,operations,reviews,gdpr,dpa
+      extra_review_rules: |
+        Context: this repository is Cashbucket's marketing engine. Cashbucket is a cash flow
+        forecasting product for NZ SMEs; this repository produces its marketing content (articles,
+        newsletters, social posts, briefs) and the tooling that drafts and publishes it. It is not
+        a recruitment or reference-check product. Review code and content diffs for legal risk
+        under New Zealand and Australian law.
+
+        New Zealand law to apply:
+        - Fair Trading Act 1986: misleading/deceptive conduct (s9), unsubstantiated representations (s12A)
+        - Financial Markets Conduct Act 2013: financial advice boundary — Cashbucket is NOT a financial advice provider; content must not cross from "here is how this works" into "here is what you should do"
+        - Credit Contracts and Consumer Finance Act 2003: credit/overdraft content must not constitute unlicensed credit advice
+        - Privacy Act 2020: any new data collection, storage, or third-party sharing triggers IPP review
+        - Employment Relations Act 2000 + Holidays Act 2003: employment content (wages, leave, PAYE) must be factually accurate
+        - Goods and Services Tax Act 1985 + Income Tax Act 2007: tax content must be accurate; must not constitute tax advice
+
+        Australian law (apply as secondary — flag if diff introduces AU-facing content or data handling):
+        - Australian Consumer Law (Competition and Consumer Act 2010, Sch 2): equivalent of FTA
+        - Privacy Act 1988 + Australian Privacy Principles: any AU customer data
+        - National Consumer Credit Protection Act 2009: credit advice boundary
+
+        Severity for this repository:
+        - CRITICAL: Clear breach likely — publish or merge creates likely legal liability. Example: a specific financial return promised, unlicensed financial advice given, personal data stored without disclosure.
+        - HIGH: Strong risk requiring resolution within 7 days. Example: a claim that could be misleading under FTA s9, a new data collection without privacy disclosure.
+        - MEDIUM: Notable risk — a disclaimer or rewording would remove it. Example: content that implies a guarantee without one, tax content that could be read as advice.
+        - LOW: Advisory — wording could be clearer. Example: a term that has a specific legal meaning being used loosely.
+
+        Content rules:
+        - Dollar figures, rates, dates, and thresholds must be traceable to a named source in the diff. If a specific figure appears without a source, flag HIGH.
+        - "Call your bank and ask for X" style specific recommendations → flag as HIGH (specific financial action advice).
+        - Content that helps a reader understand how something works → not advice; do not flag.
+        - New environment variables or API integrations → check what data flows to the external service.
+        - Changes to privacy policy, terms, or legal templates → always flag at least MEDIUM.
+
+        Scope boundaries — do NOT flag the following (they are out of scope for a LEGAL review):
+        - Infrastructure identifiers are NOT secrets, credentials, or personal information: cloud account IDs (e.g. a Cloudflare account ID), Azure tenant/subscription/resource IDs, GCP project IDs, AWS account IDs, database/resource names, public API endpoints. They cannot authenticate on their own, they routinely appear in dashboard URLs and API paths, and they cannot be "rotated." Do not flag them under the Privacy Act or as a leaked credential.
+        - The Privacy Act 2020 (and AU Privacy Act 1988 / APPs) applies only to PERSONAL INFORMATION about an identifiable natural person. Organisation identifiers, infrastructure config, and secret-management hygiene are NOT personal information — do not cite privacy law for them.
+        - Secret-management hygiene (moving a value from a committed file into a GitHub Actions secret, environment variable, or vault) is a SECURITY improvement, not a legal breach. Do not flag a diff for making config more secure. General secrets/credential handling is the security review's job, not the legal review's — stay in your lane.
+        - Do not recommend actions that are technically impossible or inapplicable (e.g. "rotate an account ID", "treat an identifier as compromised"). If your recommendation would be inapplicable, the finding is out of scope; omit it.
+    secrets: inherit
+    permissions:
+      contents: read
+      pull-requests: write
