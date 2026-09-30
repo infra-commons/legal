@@ -126,6 +126,9 @@ jobs:
           JURISDICTIONS: ${{ inputs.jurisdictions }}
           BOARD_APP_TOKEN: ${{ steps.board-token.outputs.token }}
           BOARD_KEY_FORWARDED: ${{ env.BOARD_APP_KEY != '' }}
+          # stdout is block-buffered under a heredoc: without this, "Reviewing..." and the
+          # parse line flush together at exit and the log reads as if the model call was skipped.
+          PYTHONUNBUFFERED: "1"
         run: |
           python3 << 'PYEOF'
           """
@@ -473,11 +476,22 @@ jobs:
                   f"<diff>\n{safe_diff}\n</diff>\n\n"
                   "Return a JSON object only -- no other text."
               )
+              t0 = time.monotonic()
               msg = client.messages.create(
                   model=MODEL,
                   max_tokens=MAX_OUTPUT_TOKENS,
                   system=system_prompt,
                   messages=[{"role": "user", "content": user}],
+              )
+              # Logged before the guards below, so a truncated or declined call still leaves
+              # proof in the run log that the model was actually called. getattr: a missing
+              # usage field must not raise ahead of the refusal guard.
+              usage = getattr(msg, "usage", None)
+              print(
+                  f"  Model call: {time.monotonic() - t0:.1f}s, "
+                  f"{getattr(usage, 'input_tokens', '?')} input / "
+                  f"{getattr(usage, 'output_tokens', '?')} output tokens, "
+                  f"stop_reason={getattr(msg, 'stop_reason', '?')}"
               )
               if msg.stop_reason == "max_tokens":
                   # parse_findings() locates the JSON object with str.find/rfind on
@@ -545,10 +559,29 @@ jobs:
                       "extraction is a brace scan, so prose containing an opening brace "
                       f"before the JSON produces a malformed slice. Began: {text[:200]!r}"
                   ) from exc
+              # `data.get("findings", [])` read a wrong top-level key as a green 0 findings.
+              # The prompt names the key, so its absence is a format drift, not "clean".
+              if not isinstance(data, dict) or "findings" not in data:
+                  keys = sorted(map(str, data))[:10] if isinstance(data, dict) else type(data).__name__
+                  raise RuntimeError(
+                      "Legal review response JSON has no top-level 'findings' key (got: "
+                      f"{sanitize(str(keys), 200)}) -- refusing to record 'no findings' from a "
+                      "response in the wrong shape."
+                  )
+              if not isinstance(data["findings"], list):
+                  raise RuntimeError(
+                      "Legal review response 'findings' is not a list (got "
+                      f"{type(data['findings']).__name__}) -- refusing to record 'no findings'."
+                  )
               findings = []
-              for raw in data.get("findings", []):
+              dropped: list[str] = []
+              for raw in data["findings"]:
+                  if not isinstance(raw, dict):
+                      dropped.append(type(raw).__name__)
+                      continue
                   sev = str(raw.get("severity", "")).upper()
                   if sev not in ALLOWED_SEVERITIES:
+                      dropped.append(sanitize(sev, 20) or "<none>")
                       continue
                   findings.append({
                       "severity": sev,
@@ -557,6 +590,11 @@ jobs:
                       "description": sanitize(str(raw.get("description", "")), 800),
                       "category": sanitize(str(raw.get("category", "unknown")), 50),
                   })
+              if dropped:
+                  print(
+                      f"  WARNING: dropped {len(dropped)} finding(s) with off-schema severity: "
+                      f"{sorted(set(dropped))}"
+                  )
               return findings
 
 

@@ -305,6 +305,56 @@ def test_capture_still_returns_empty_on_a_genuinely_empty_response(capture):
     assert capture.parse_findings("   \n ") == []
 
 
+@pytest.mark.parametrize("payload", [
+    {},
+    {"issues": [{"severity": "CRITICAL", "title": "x"}]},
+    [{"severity": "CRITICAL", "title": "x"}],
+])
+def test_capture_raises_when_the_findings_key_is_absent(capture, payload):
+    """`data.get("findings", [])` read a wrong top-level key as a green 0."""
+    with pytest.raises(RuntimeError, match="no top-level 'findings' key"):
+        capture.parse_findings(json.dumps(payload))
+
+
+def test_capture_raises_when_findings_is_not_a_list(capture):
+    with pytest.raises(RuntimeError, match="not a list"):
+        capture.parse_findings(json.dumps({"findings": None}))
+
+
+def test_capture_an_explicit_empty_findings_list_is_clean(capture):
+    assert capture.parse_findings(json.dumps({"findings": []})) == []
+
+
+def test_capture_reports_findings_dropped_for_off_schema_severity(capture, capsys):
+    payload = json.dumps({"findings": [
+        {"severity": "HIGH", "title": "kept"},
+        {"severity": "SEVERE", "title": "dropped"},
+        {"title": "no severity"},
+        "not an object",
+    ]})
+    findings = capture.parse_findings(payload)
+    assert [f["title"] for f in findings] == ["kept"]
+    assert "dropped 3 finding(s) with off-schema severity" in capsys.readouterr().out
+
+
+def test_capture_is_silent_when_nothing_is_dropped(capture, capsys):
+    capture.parse_findings(json.dumps({"findings": [{"severity": "LOW", "title": "t"}]}))
+    assert "dropped" not in capsys.readouterr().out
+
+
+def test_capture_step_runs_python_unbuffered():
+    """Block-buffered stdout made "Reviewing..." and "Parsed N" flush together,
+    reading as a skipped model call."""
+    import yaml
+    from conftest import CAPTURE_WORKFLOW
+
+    wf = yaml.safe_load(CAPTURE_WORKFLOW.read_text(encoding="utf-8"))
+    steps = [s for job in wf["jobs"].values() for s in job.get("steps", [])
+             if "python3 << 'PYEOF'" in s.get("run", "")]
+    assert len(steps) == 1
+    assert steps[0]["env"]["PYTHONUNBUFFERED"] == "1"
+
+
 # ── scan.parse_findings ─────────────────────────────────────────────────────
 
 def test_scan_parses_pipe_delimited_findings(scan):

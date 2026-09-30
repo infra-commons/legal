@@ -30,8 +30,9 @@ _UNSET = object()
 
 
 class _FakeUsage:
-    def __init__(self, output_tokens: int):
+    def __init__(self, output_tokens: int, input_tokens: int = 1234):
         self.output_tokens = output_tokens
+        self.input_tokens = input_tokens
 
 
 class _FakeContentBlock:
@@ -246,3 +247,39 @@ def test_scan_module_execs_cleanly_from_its_workflow_heredoc(scan):
     # test_legal_model_pin_and_format.py for the full contract.
     with pytest.raises(RuntimeError, match="SCAN_COMPLETE"):
         scan.parse_findings("not json")
+
+
+# ── Proof of the call: lead-relay #592 ─────────────────────────────────────
+# "Reviewing..." and "Parsed N" logged 2ms apart and read as a skipped model
+# call. The capture step now logs elapsed time and token usage per call, before
+# the guards, so a truncated or declined call leaves the same proof.
+
+@pytest.mark.parametrize("stop_reason,raises", [
+    ("end_turn", False), ("max_tokens", True), ("refusal", True),
+])
+def test_capture_logs_the_model_call_before_the_guards(
+    capture, monkeypatch, capsys, stop_reason, raises
+):
+    message = _FakeMessage(text='{"findings": []}', stop_reason=stop_reason, output_tokens=321)
+    _install_fake_client(monkeypatch, capture, message)
+
+    if raises:
+        with pytest.raises(RuntimeError):
+            capture.review_diff("k", "diff", "", "system prompt")
+    else:
+        capture.review_diff("k", "diff", "", "system prompt")
+
+    out = capsys.readouterr().out
+    assert "Model call: " in out
+    assert "1234 input / 321 output tokens" in out
+    assert f"stop_reason={stop_reason}" in out
+
+
+def test_capture_call_log_survives_a_message_without_usage(capture, monkeypatch, capsys):
+    """A missing usage field must not raise ahead of the #51 refusal guard."""
+    message = _FakeMessage(text="partial", stop_reason="refusal")
+    del message.usage
+    _install_fake_client(monkeypatch, capture, message)
+    with pytest.raises(RuntimeError, match="stop_reason=refusal"):
+        capture.review_diff("k", "diff", "", "system prompt")
+    assert "? input / ? output tokens" in capsys.readouterr().out
