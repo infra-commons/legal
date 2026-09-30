@@ -116,7 +116,9 @@ jobs:
           # MID tier, matching infra-commons/security's adversarial gate
           # (.github/actions/adversarial-review/adversarial-review.py:57). Both gates merge
           # fleet-wide as required checks; this pin closes a full-generation split between
-          # the two canonical AI reviewers (measured 2026-09-01).
+          # the two canonical AI reviewers (measured 2026-09-01). Moved to claude-sonnet-5-5
+          # under infra-commons/meta#1664; security moves in its own PR, so the two gates
+          # can sit one point-release apart until both land.
           #
           # A model swap on a reviewer gate is NOT a one-line change. Findings reach the
           # suppression filter as free-text prose, and the merge verdict is parsed out of
@@ -124,7 +126,7 @@ jobs:
           # silently resurface settled false positives (the still-open gpt-4o -> gpt-5.5
           # regression) or, worse, read as clean. The format guards below are what make
           # this pin safe to move; do not move it again without re-reading them.
-          MODEL = "claude-sonnet-5"
+          MODEL = "claude-sonnet-5-5"
           AUDIT_LABEL = "legal-audit"
           AUDIT_LABEL_COLOR = "0075ca"
           MAX_BATCH_CHARS = 40_000
@@ -298,6 +300,18 @@ jobs:
                   parts.append(f"=== FILE: {f} ===\n{numbered}\n")
               parts.append("Review the files above for legal risks. List findings in SEVERITY|file:line|Category|Description format, then SCAN_COMPLETE.")
               return "\n".join(parts)
+
+          def _refusal_category(message) -> str:
+              """`stop_details.category` of a declined response, or "unknown".
+
+              getattr throughout: an SDK older than `stop_details` still deserialises the
+              field as an extra attribute or drops it, and neither may mask the refusal.
+              """
+              details = getattr(message, "stop_details", None)
+              if isinstance(details, dict):
+                  return str(details.get("category") or "unknown")
+              return str(getattr(details, "category", None) or "unknown")
+
 
           def _response_text(message) -> str:
               """Concatenate the text blocks of an Anthropic response, in order.
@@ -648,6 +662,14 @@ jobs:
                               f"response truncated at max_tokens "
                               f"({msg.usage.output_tokens} output tokens) -- skipping "
                               "this batch rather than parsing a partial response"
+                          )
+                      if msg.stop_reason == "refusal":
+                          # claude-sonnet-5-5 declines in more safety-classifier categories
+                          # than its predecessor, and a decline can carry partial text.
+                          raise RuntimeError(
+                              f"model declined (stop_reason=refusal, category="
+                              f"{_refusal_category(msg)}) -- skipping this batch rather "
+                              "than parsing a partial response"
                           )
                       findings = parse_findings(_response_text(msg))
                       print(f"  Found {len(findings)} finding(s).")
