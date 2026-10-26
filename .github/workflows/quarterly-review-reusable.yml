@@ -44,11 +44,15 @@ jobs:
     env:
       # A step `if:` cannot read `secrets`, but it can read job-level `env`
       # (infra-commons/security#90) -- same guard as the capture reusable.
-      BOARD_APP_KEY: ${{ secrets.INFRA_COMMONS_BOT_PRIVATE_KEY }}
+      # Only the secret's PRESENCE ("true"/"false") is mapped, never its value
+      # (infra-commons/meta#1775, same fix as infra-commons/security#181): job env is readable by
+      # every step and child process in the job, including third-party actions and pip installs.
+      # The one step that needs the key reads it from `secrets.` in its own `with:` below.
+      BOARD_APP_KEY_SET: ${{ secrets.INFRA_COMMONS_BOT_PRIVATE_KEY != '' }}
     steps:
       - name: Open quarterly review issue
         id: create
-        uses: actions/github-script@v9
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           JURISDICTIONS: ${{ inputs.jurisdictions }}
         with:
@@ -92,7 +96,7 @@ jobs:
       # without a record: a miss is a `::warning` naming the issue.
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         id: board-token
-        if: ${{ env.BOARD_APP_KEY != '' }}
+        if: ${{ env.BOARD_APP_KEY_SET == 'true' }}
         continue-on-error: true
         with:
           client-id: Iv23liH9thgSIViTxbMV # gitleaks:allow
@@ -111,7 +115,7 @@ jobs:
         continue-on-error: true
         env:
           BOARD_APP_TOKEN: ${{ steps.board-token.outputs.token }}
-          BOARD_KEY_FORWARDED: ${{ env.BOARD_APP_KEY != '' }}
+          BOARD_KEY_FORWARDED: ${{ env.BOARD_APP_KEY_SET == 'true' }}
           REPO: ${{ github.repository }}
           ISSUE_NUMBER: ${{ steps.create.outputs.number }}
           ISSUE_NODE_ID: ${{ steps.create.outputs.node_id }}
