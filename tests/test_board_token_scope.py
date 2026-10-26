@@ -56,9 +56,9 @@ def test_board_token_also_requests_issues_read(workflow):
 @_each
 def test_board_token_step_is_guarded_and_never_fails_the_job(workflow):
     # A secret this org hasn't provisioned yet must not touch the job's outcome — see the
-    # optional `INFRA_COMMONS_BOT_PRIVATE_KEY` secret and BOARD_APP_KEY env guard above it.
+    # optional `INFRA_COMMONS_BOT_PRIVATE_KEY` secret and BOARD_APP_KEY_SET presence guard above it.
     step = _board_token_step(workflow)
-    assert step.get("if") == "${{ env.BOARD_APP_KEY != '' }}"
+    assert step.get("if") == "${{ env.BOARD_APP_KEY_SET == 'true' }}"
     assert step.get("continue-on-error") is True
 
 

@@ -44,7 +44,7 @@ def test_board_steps_run_after_the_create_and_can_never_fail_the_job(workflow):
         assert step.get("continue-on-error") is True, f"{step} could turn a filed issue into a red job"
     env = steps[board]["env"]
     assert env["ISSUE_NODE_ID"] == "${{ steps.create.outputs.node_id }}"
-    assert env["BOARD_KEY_FORWARDED"] == "${{ env.BOARD_APP_KEY != '' }}"
+    assert env["BOARD_KEY_FORWARDED"] == "${{ env.BOARD_APP_KEY_SET == 'true' }}"
     assert "core.setOutput('node_id', issue.data.node_id)" in steps[create]["with"]["script"]
 
 
@@ -52,7 +52,7 @@ def test_board_steps_run_after_the_create_and_can_never_fail_the_job(workflow):
 def test_board_token_scope_and_optional_secret(workflow):
     doc = yaml.safe_load(workflow.read_text(encoding="utf-8"))
     token = next(s for s in _steps(workflow) if s.get("id") == "board-token")
-    assert token["if"] == "${{ env.BOARD_APP_KEY != '' }}"
+    assert token["if"] == "${{ env.BOARD_APP_KEY_SET == 'true' }}"
     assert token["with"]["permission-organization-projects"] == "write"
     assert token["with"]["permission-issues"] == "read"
     # `on:` parses as True under YAML 1.1 -- see test_board_token_scope.py.
