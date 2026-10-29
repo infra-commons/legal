@@ -24,6 +24,7 @@ of silently -- which is the property that makes the next pin move safe too.
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
@@ -344,15 +345,19 @@ def test_capture_is_silent_when_nothing_is_dropped(capture, capsys):
 
 def test_capture_step_runs_python_unbuffered():
     """Block-buffered stdout made "Reviewing..." and "Parsed N" flush together,
-    reading as a skipped model call."""
+    reading as a skipped model call.
+
+    Pinned as the `-u` flag, not PYTHONUNBUFFERED: the heredoc runs under `-I`, which
+    ignores every PYTHON* env var, so the env form would be set and silently void.
+    """
     import yaml
     from conftest import CAPTURE_WORKFLOW
 
     wf = yaml.safe_load(CAPTURE_WORKFLOW.read_text(encoding="utf-8"))
-    steps = [s for job in wf["jobs"].values() for s in job.get("steps", [])
-             if "python3 << 'PYEOF'" in s.get("run", "")]
-    assert len(steps) == 1
-    assert steps[0]["env"]["PYTHONUNBUFFERED"] == "1"
+    runs = [s.get("run", "") for job in wf["jobs"].values() for s in job.get("steps", [])
+            if "<< 'PYEOF'" in s.get("run", "")]
+    assert len(runs) == 1
+    assert re.search(r"^python3\b.*\s-u\s.*<< 'PYEOF'$", runs[0], re.M), runs[0]
 
 
 # ── scan.parse_findings ─────────────────────────────────────────────────────

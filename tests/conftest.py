@@ -7,6 +7,7 @@ copy -- so a test can only pass against the code the fleet actually runs.
 from __future__ import annotations
 
 import os
+import re
 import sys
 import textwrap
 import types
@@ -28,7 +29,8 @@ WORKFLOW = REPO_ROOT / ".github" / "workflows" / "legal-review-reusable.yml"
 CAPTURE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "legal-capture-findings-reusable.yml"
 SCAN_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "legal-codebase-scan-reusable.yml"
 
-_BEGIN = "python3 << 'PYEOF'"
+# Interpreter flags vary per workflow (`-I`, `-I -u`); the heredoc delimiter does not.
+_BEGIN = re.compile(r"^python3(?:\s+-\w+)*\s+<< 'PYEOF'$")
 _END = "PYEOF"
 
 
@@ -42,10 +44,10 @@ def extract_reviewer_source(workflow_path: Path = WORKFLOW) -> str:
     """
     lines = workflow_path.read_text(encoding="utf-8").splitlines()
 
-    begins = [i for i, ln in enumerate(lines) if ln.strip() == _BEGIN]
+    begins = [i for i, ln in enumerate(lines) if _BEGIN.match(ln.strip())]
     if len(begins) != 1:
         raise AssertionError(
-            f"expected exactly 1 {_BEGIN!r} in {workflow_path.name}, found {len(begins)}"
+            f"expected exactly 1 {_BEGIN.pattern!r} in {workflow_path.name}, found {len(begins)}"
         )
     start = begins[0]
 

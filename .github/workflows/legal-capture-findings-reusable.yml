@@ -130,11 +130,13 @@ jobs:
           JURISDICTIONS: ${{ inputs.jurisdictions }}
           BOARD_APP_TOKEN: ${{ steps.board-token.outputs.token }}
           BOARD_KEY_FORWARDED: ${{ env.BOARD_APP_KEY_SET == 'true' }}
-          # stdout is block-buffered under a heredoc: without this, "Reviewing..." and the
-          # parse line flush together at exit and the log reads as if the model call was skipped.
-          PYTHONUNBUFFERED: "1"
+        # `-I` (isolated): cwd is the caller's checkout, so without it a committed `yaml.py`
+        # would import ahead of the real one with the keys above in env (meta#1778, M-import).
+        # `-I` also ignores PYTHON* env vars, so unbuffered output is `-u`, not PYTHONUNBUFFERED:
+        # stdout is block-buffered under a heredoc, and without it "Reviewing..." and the parse
+        # line flush together at exit and the log reads as if the model call was skipped.
         run: |
-          python3 << 'PYEOF'
+          python3 -I -u << 'PYEOF'
           """
           Capture legal findings from a single merge.
 
