@@ -207,6 +207,7 @@ jobs:
           # this pin safe to move; do not move it again without re-reading them.
           MODEL = "claude-sonnet-5-5"
           MARKER = "<!-- legal-review-bot -->"
+          _COMMENT_AUTHOR = "github-actions[bot]"
           _SHA_RE = re.compile(r'^[0-9a-f]{40}$')
           CANONICAL_SUPPRESSIONS_REPO = "infra-commons/legal"
           CANONICAL_SUPPRESSIONS_PATH = ".github/legal-review-suppressions.yml"
@@ -823,7 +824,13 @@ jobs:
                   )
                   resp.raise_for_status()
                   for comment in resp.json():
-                      if MARKER in comment.get("body", ""):
+                      # Only this bot's own comments (meta#1779, L2). The marker is plain text
+                      # anyone can paste, so matching it alone deleted human comments that quoted
+                      # a review. The job posts with `github.token`, i.e. as github-actions[bot],
+                      # and every comment it posts starts with the marker.
+                      author = (comment.get("user") or {}).get("login", "")
+                      body = comment.get("body") or ""
+                      if author == _COMMENT_AUTHOR and body.startswith(MARKER):
                           # Best-effort: removing a stale prior comment is cosmetic
                           # cleanup, not part of the gate. A transient API error, or a
                           # comment already gone (404), must not fail the review job —
