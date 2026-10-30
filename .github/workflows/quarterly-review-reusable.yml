@@ -121,7 +121,7 @@ jobs:
           ISSUE_NODE_ID: ${{ steps.create.outputs.node_id }}
         run: |
           pip install --quiet httpx==0.28.1
-          python3 << 'PYEOF'
+          python3 -I << 'PYEOF'
           import os
           import sys
 

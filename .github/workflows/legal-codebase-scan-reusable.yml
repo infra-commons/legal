@@ -97,7 +97,7 @@ jobs:
           BOARD_APP_TOKEN: ${{ steps.board-token.outputs.token }}
           BOARD_KEY_FORWARDED: ${{ env.BOARD_APP_KEY_SET == 'true' }}
         run: |
-          python3 << 'PYEOF'
+          python3 -I << 'PYEOF'
           """
           Legal codebase scan — retrospective full-repo legal AI review.
 

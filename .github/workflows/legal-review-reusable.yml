@@ -114,9 +114,15 @@ jobs:
     name: legal-review
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # Skip only a run that is Dependabot's on both counts: Dependabot opened the PR AND
+    # triggered this run (meta#1778, M-actor). `github.actor` alone is whoever triggered the
+    # run, not whose code it is; the PR author alone would skip a human's push onto a
+    # Dependabot branch, which gets normal secrets and is reviewed today. The gate's
+    # IS_DEPENDABOT below must match this expression exactly.
     if: >-
       ${{ github.event.pull_request.head.repo.full_name == github.repository
-          && github.actor != 'dependabot[bot]' }}
+          && !(github.event.pull_request.user.login == 'dependabot[bot]'
+               && github.actor == 'dependabot[bot]') }}
     permissions:
       contents: read
       pull-requests: write
@@ -147,8 +153,11 @@ jobs:
           FORCE_REVIEW: ${{ inputs.force }}
           EXTRA_SURFACE_PATHS: ${{ inputs.extra_surface_paths }}
           EXTRA_REVIEW_RULES: ${{ inputs.extra_review_rules }}
+        # `-I` (isolated): cwd is the PR head checkout, so without it a PR-added `yaml.py` or
+        # `httpx.py` would import ahead of the real one with the key and token above in env
+        # (meta#1778, M-import).
         run: |
-          python3 << 'PYEOF'
+          python3 -I << 'PYEOF'
           """
           Legal AI review — Claude-powered.
 
@@ -1153,7 +1162,9 @@ jobs:
     steps:
       - name: Evaluate findings
         env:
-          IS_DEPENDABOT: ${{ github.actor == 'dependabot[bot]' }}
+          IS_DEPENDABOT: >-
+            ${{ github.event.pull_request.user.login == 'dependabot[bot]'
+                && github.actor == 'dependabot[bot]' }}
           IS_FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
           REVIEW_RESULT: ${{ needs.legal-review.result }}
           HAS_CRITICAL: ${{ needs.legal-review.outputs.has_critical }}
