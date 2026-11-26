@@ -255,7 +255,7 @@ def _capture_main_harness(capture, monkeypatch, findings, board_calls, created):
     monkeypatch.setenv("BOARD_APP_TOKEN", "board-tok")
     monkeypatch.setenv("BOARD_KEY_FORWARDED", "true")
     for name, value in {
-        "get_diff": lambda b, a: "diff --git a/x b/x\n+x",
+        "get_diff": lambda b, a, *_: "diff --git a/x b/x\n+x",
         "get_repo_context": lambda: "",
         "_build_system_prompt": lambda j: "",
         "review_diff": lambda *a: "",

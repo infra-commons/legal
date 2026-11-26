@@ -36,6 +36,15 @@ name: Capture legal findings (reusable)
 # A tag push without base_sha fails loud (exit 1) rather than reporting a green "nothing to
 # capture": its before is all zeros, which used to read as branch creation.
 #
+# Excluding paths (infra-commons/legal#31): .github/*-suppressions.yml is always dropped from the
+# reviewed diff. A caller may drop more, e.g. release notes that describe fixed defects:
+#
+#       with:
+#         exclude_paths: 'docs/release-notes/**,CHANGELOG.md'
+#
+# That is a trade, so it is opt-in: a release note can also be where a live residual exposure
+# is first written down, and an excluded path is never reviewed.
+#
 # The caller workflow must grant:
 #   permissions:
 #     contents: read
@@ -61,6 +70,14 @@ on:
       head_sha:
         description: >-
           Optional 40-hex commit to diff TO. Unset: github.event.after.
+        required: false
+        default: ''
+        type: string
+      exclude_paths:
+        description: >-
+          Optional comma- or newline-separated git globs (repo-root relative; ** crosses
+          directories) dropped from the reviewed diff, on top of the always-excluded
+          .github/*-suppressions.yml. Diff only: repo context files are still read. Unset: no change.
         required: false
         default: ''
         type: string
@@ -151,6 +168,7 @@ jobs:
           AFTER_SHA: ${{ github.event.after }}
           BASE_SHA_INPUT: ${{ inputs.base_sha }}
           HEAD_SHA_INPUT: ${{ inputs.head_sha }}
+          EXCLUDE_PATHS_INPUT: ${{ inputs.exclude_paths }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           JURISDICTIONS: ${{ inputs.jurisdictions }}
           BOARD_APP_TOKEN: ${{ steps.board-token.outputs.token }}
@@ -180,6 +198,7 @@ jobs:
             JURISDICTIONS      comma-separated jurisdictions (default: NZ,AU)
             BASE_SHA_INPUT     overrides BEFORE_SHA when set (inputs.base_sha)
             HEAD_SHA_INPUT     overrides AFTER_SHA when set  (inputs.head_sha)
+            EXCLUDE_PATHS_INPUT  extra globs to drop from the diff (inputs.exclude_paths)
           """
           import json
           import os
@@ -444,16 +463,44 @@ jobs:
               return base, head
 
 
-          def get_diff(before: str, after: str) -> str:
+          # Always excluded from the reviewed diff: editing a suppression entry must
+          # never be re-reviewed as a finding, otherwise suppressing a false positive
+          # itself gets flagged (an infinite-noise loop). They are config, not code.
+          ALWAYS_EXCLUDED = ".github/*-suppressions.yml"
+
+
+          def parse_exclude_paths(raw: str) -> "list[str]":
+              """The caller's exclude_paths input as a list of globs (infra-commons/legal#31)."""
+              globs = [g.strip() for g in re.split(r"[,\n]", raw or "") if g.strip()]
+              for g in globs:
+                  if g.startswith(":"):
+                      raise ValueError(
+                          f"exclude_paths entry {g!r} starts with ':' -- pass plain globs, "
+                          "not git pathspec magic")
+              return globs
+
+
+          def _pathspec(extra_excludes) -> "list[str]":
+              return ["--", ".", f":(exclude,glob){ALWAYS_EXCLUDED}",
+                      *(f":(exclude,glob){g}" for g in extra_excludes)]
+
+
+          def excluded_by_caller(before: str, after: str, extra_excludes) -> "list[str]":
+              """Changed files the caller's globs dropped, so an over-broad glob is visible."""
+              def names(extra):
+                  out = subprocess.run(
+                      ["git", "diff", "--name-only", f"{before}...{after}", *_pathspec(extra)],
+                      capture_output=True, encoding="utf-8", errors="replace", check=True,
+                  ).stdout
+                  return set(out.splitlines())
+              return sorted(names(()) - names(extra_excludes))
+
+
+          def get_diff(before: str, after: str, extra_excludes=()) -> str:
               if not _SHA_RE.match(before) or not _SHA_RE.match(after):
                   raise ValueError(f"Invalid commit SHA: before={before!r} after={after!r}")
               result = subprocess.run(
-                  # Exclude the review suppression files from the reviewed diff:
-                  # editing a suppression entry must never be re-reviewed as a
-                  # finding, otherwise suppressing a false positive itself gets
-                  # flagged (an infinite-noise loop). They are config, not code.
-                  ["git", "diff", f"{before}...{after}",
-                   "--", ".", ":(exclude,glob).github/*-suppressions.yml"],
+                  ["git", "diff", f"{before}...{after}", *_pathspec(extra_excludes)],
                   capture_output=True, encoding="utf-8", errors="replace", check=True,
               )
               diff = result.stdout
@@ -1206,6 +1253,7 @@ jobs:
 
               try:
                   reviewed = resolve_range(os.environ)
+                  extra_excludes = parse_exclude_paths(os.environ.get("EXCLUDE_PATHS_INPUT", ""))
               except ValueError as exc:
                   print(f"ERROR: {exc}", file=sys.stderr)
                   sys.exit(1)
@@ -1214,7 +1262,12 @@ jobs:
               before, after = reviewed
 
               try:
-                  diff = get_diff(before, after)
+                  if extra_excludes:
+                      dropped = excluded_by_caller(before, after, extra_excludes)
+                      shown = ", ".join(dropped[:20]) + (" ..." if len(dropped) > 20 else "")
+                      print(f"exclude_paths {extra_excludes} dropped {len(dropped)} changed "
+                            f"file(s) from review: {shown or '(none)'}")
+                  diff = get_diff(before, after, extra_excludes)
               except (ValueError, subprocess.CalledProcessError) as exc:
                   print(f"ERROR: could not compute merge diff: {exc}", file=sys.stderr)
                   sys.exit(1)
