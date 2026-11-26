@@ -115,7 +115,7 @@ def test_main_diffs_the_input_range(capture, monkeypatch):
     _main_env(capture, monkeypatch, GITHUB_EVENT_NAME="schedule",
               BASE_SHA_INPUT=C, HEAD_SHA_INPUT=D)
     seen = []
-    monkeypatch.setattr(capture, "get_diff", lambda b, a: seen.append((b, a)) or "")
+    monkeypatch.setattr(capture, "get_diff", lambda b, a, *_: seen.append((b, a)) or "")
     capture.main()  # empty diff -> clean return
     assert seen == [(C, D)]
 
