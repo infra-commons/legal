@@ -26,6 +26,16 @@ name: Capture legal findings (reusable)
 #         # secret; filed issues then stay off the board (each one warns), nothing else changes:
 #         INFRA_COMMONS_BOT_PRIVATE_KEY: ${{ secrets.INFRA_COMMONS_BOT_PRIVATE_KEY }}
 #
+# Other cadences (infra-commons/legal#31): a non-push trigger, or a tag push, has no usable
+# github.event.before/after, so pass the range explicitly. Both default to the push event.
+#
+#       with:
+#         base_sha: ${{ needs.range.outputs.base }}   # e.g. the previous release tag's commit
+#         head_sha: ${{ github.sha }}
+#
+# A tag push without base_sha fails loud (exit 1) rather than reporting a green "nothing to
+# capture": its before is all zeros, which used to read as branch creation.
+#
 # The caller workflow must grant:
 #   permissions:
 #     contents: read
@@ -40,6 +50,19 @@ on:
         description: 'Comma-separated legal jurisdictions, e.g. "NZ,AU" or "NZ,JP"'
         required: false
         default: 'NZ,AU'
+        type: string
+      base_sha:
+        description: >-
+          Optional 40-hex commit to diff FROM. Unset: github.event.before (push callers need
+          nothing). Set it for schedule / release / dispatch / tag-push callers.
+        required: false
+        default: ''
+        type: string
+      head_sha:
+        description: >-
+          Optional 40-hex commit to diff TO. Unset: github.event.after.
+        required: false
+        default: ''
         type: string
     secrets:
       ANTHROPIC_API_KEY:
@@ -126,6 +149,8 @@ jobs:
           REPO: ${{ github.repository }}
           BEFORE_SHA: ${{ github.event.before }}
           AFTER_SHA: ${{ github.event.after }}
+          BASE_SHA_INPUT: ${{ inputs.base_sha }}
+          HEAD_SHA_INPUT: ${{ inputs.head_sha }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           JURISDICTIONS: ${{ inputs.jurisdictions }}
           BOARD_APP_TOKEN: ${{ steps.board-token.outputs.token }}
@@ -153,6 +178,8 @@ jobs:
             RUN_URL            URL of the current workflow run
           Optional env vars:
             JURISDICTIONS      comma-separated jurisdictions (default: NZ,AU)
+            BASE_SHA_INPUT     overrides BEFORE_SHA when set (inputs.base_sha)
+            HEAD_SHA_INPUT     overrides AFTER_SHA when set  (inputs.head_sha)
           """
           import json
           import os
@@ -384,6 +411,38 @@ jobs:
 
 
           # ── Diff ───────────────────────────────────────────────────────────
+
+          def resolve_range(environ) -> "tuple[str, str] | None":
+              """The (base, head) to review, or None when there is nothing to capture.
+
+              An input, when set, wins over the push event's value for its side. Every
+              case with no reviewable range raises ValueError (exit 1) except a branch
+              creation push, which keeps its long-standing exit 0. A tag push also has an
+              all-zeros `before`, and used to take that exit 0 too: green, reviewed nothing
+              (infra-commons/legal#31). The event name and ref are read only on these failure
+              paths, so a valid push range never depends on them.
+              """
+              base_in = environ.get("BASE_SHA_INPUT", "")
+              head_in = environ.get("HEAD_SHA_INPUT", "")
+              for name, value in (("base_sha", base_in), ("head_sha", head_in)):
+                  if value and (not _SHA_RE.match(value) or set(value) == {"0"}):
+                      raise ValueError(f"input {name}={value!r} is not a 40-hex commit SHA")
+              base = base_in or environ.get("BEFORE_SHA", "")
+              head = head_in or environ.get("AFTER_SHA", "")
+              event = environ.get("GITHUB_EVENT_NAME", "") or "unknown"
+              if not head:
+                  raise ValueError(
+                      f"no head commit: a {event!r} event carries no push range -- "
+                      "pass the base_sha/head_sha inputs")
+              if base and set(base) == {"0"}:
+                  if environ.get("GITHUB_REF", "").startswith("refs/tags/"):
+                      raise ValueError(
+                          "a tag push carries no prior commit, so there is no range to "
+                          "review -- pass the base_sha input (e.g. the previous tag's commit)")
+                  print("Push has no prior commit (branch creation) -- nothing to capture.")
+                  return None
+              return base, head
+
 
           def get_diff(before: str, after: str) -> str:
               if not _SHA_RE.match(before) or not _SHA_RE.match(after):
@@ -1131,8 +1190,6 @@ jobs:
               api_key  = os.environ.get("ANTHROPIC_API_KEY", "")
               token    = os.environ.get("GITHUB_TOKEN", "")
               repo     = os.environ.get("REPO", "")
-              before   = os.environ.get("BEFORE_SHA", "")
-              after    = os.environ.get("AFTER_SHA", "")
               run_url  = os.environ.get("RUN_URL", "")
               jurisdictions = os.environ.get("JURISDICTIONS", "NZ,AU")
               board_token = os.environ.get("BOARD_APP_TOKEN", "")
@@ -1141,15 +1198,20 @@ jobs:
 
               missing = [k for k, v in {
                   "ANTHROPIC_API_KEY": api_key, "GITHUB_TOKEN": token,
-                  "REPO": repo, "AFTER_SHA": after,
+                  "REPO": repo,
               }.items() if not v]
               if missing:
                   print(f"ERROR: missing env vars: {', '.join(missing)}", file=sys.stderr)
                   sys.exit(1)
 
-              if before and set(before) == {"0"}:
-                  print("Push has no prior commit (branch creation) -- nothing to capture.")
+              try:
+                  reviewed = resolve_range(os.environ)
+              except ValueError as exc:
+                  print(f"ERROR: {exc}", file=sys.stderr)
+                  sys.exit(1)
+              if reviewed is None:
                   return
+              before, after = reviewed
 
               try:
                   diff = get_diff(before, after)
