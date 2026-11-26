@@ -255,6 +255,7 @@ suppressions:
       false positive. Permanent.
 
   - id: anthropic-inference-residency-accepted
+    file_pattern: "(^|/)(docs/decisions/0001-inference-provider-anthropic\\.md|migrations/0003-inference-residency\\.md|schema/client\\.schema\\.json)(:\\d+(-\\d+)?)?$"
     finding_pattern: "(cross.border|overseas|off.?shore|sub.?processor|inference (provider|residency|to)).{0,90}(anthropic|united states|\\bus\\b)|anthropic.{0,80}(cross.border|overseas|us inference|sub.?processor|permanent|all environments)"
     reason: >
       Routing model inference to Anthropic (US) is a formalised, disclosed, accepted architectural
@@ -263,6 +264,14 @@ suppressions:
       restating that accepted decision (e.g. in an ADR) is not itself a legal defect. A genuinely
       new transfer concern should be raised against the DPA/register, not re-filed per merge.
       Permanent.
+      SCOPED (infra-commons/legal#30) to the three documents that record the decision: the
+      inference-provider ADR, the residency migration note, and the client schema carrying the
+      `llm.inference_residency` setting. It previously had no file_pattern and so applied to
+      every file in every calling repo. DPAs, privacy notices, sub-processor lists, contracts
+      and review documents are deliberately NOT covered: a transfer finding there is the
+      "genuinely new concern" this reason says must be raised, and it must keep filing.
+    added: "2026-07-01"
+    added_by: "infra-commons/security#19"
 
   - id: microsoft-graph-customer-tenant-not-new-subprocessor
     file_pattern: '(templates/dpa\.md|.*/dpa\.md)'
