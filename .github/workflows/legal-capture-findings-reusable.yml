@@ -829,8 +829,8 @@ jobs:
               return titles
 
 
-          def suppressed_issue_keys(token: str, repo: str) -> set[str]:
-              """Title/location keys for closed legal issues that must never be re-filed.
+          def suppressed_issue_keys(token: str, repo: str) -> dict[str, int]:
+              """Title/location keys (-> issue number) for closed legal issues never to re-file.
 
               A finding closed as **not planned** (state_reason) or carrying the
               **wont-fix** label is a durable suppression: the reviewer deliberately
@@ -838,7 +838,7 @@ jobs:
               not re-file it. Issues closed as *completed* are intentionally NOT
               suppressed -- if such a finding recurs it is a regression worth surfacing.
               """
-              keys: set[str] = set()
+              keys: dict[str, int] = {}
               with httpx.Client(timeout=_TIMEOUT) as client:
                   page = 1
                   while True:
@@ -854,10 +854,10 @@ jobs:
                           if issue.get("state_reason") != "not_planned" and "wont-fix" not in labels:
                               continue
                           title = issue["title"]
-                          keys.add(title)
+                          keys[title] = issue.get("number", 0)
                           loc = _location_key(title)
                           if loc:
-                              keys.add(loc)
+                              keys[loc] = issue.get("number", 0)
                       if len(batch) < 100:
                           break
                       page += 1
@@ -877,6 +877,80 @@ jobs:
           def _location_key(title: str) -> str | None:
               m = _ISSUE_PREFIX_RE.match(title)
               return m.group(1) if m else None
+
+
+          # ── Concern-level dedupe (infra-commons/legal#34) ─────────────────
+          #
+          # _location_key() is file:line, so a concern re-reported at a shifted line re-files.
+          # This matches on (severity, path without line numbers, title words) instead.
+          # It is OR'd after the exact checks, so it can only file less, never more, and it
+          # reads every already-filed title with no migration. The 0.5 overlap floor is
+          # calibrated on 533 same-file pairs of a caller's real issues: >=0.5 matched only true
+          # duplicates. Lower bands mix true duplicates with distinct concerns, so different
+          # wording across files is out of reach here. That half needs judgement, not tokens.
+          # Every ambiguous parse returns None, which means the finding is filed.
+          _CONCERN_MIN_OVERLAP = 0.5
+          _CONCERN_TITLE_RE = re.compile(r'\[Legal\]\[legal-ai\]\[([A-Z]+)\] (.+?) -- (.*)\Z', re.S)
+          _LINE_SUFFIX_RE = re.compile(r':\d+(?:-\d+)?(?=$|[\s,;)])')
+          _CONCERN_STOPWORDS = frozenset(
+              "the and for with from into that this not are was has have its any all but".split())
+
+
+          def _concern_parts(title: str) -> "tuple[str, str, frozenset[str]] | None":
+              m = _CONCERN_TITLE_RE.match(title or "")
+              if not m:
+                  return None
+              path = _LINE_SUFFIX_RE.sub("", m.group(2)).strip()
+              if not path or path.lower() == "unknown":
+                  return None
+              words = frozenset(w for w in re.findall(r'[a-z0-9]+', m.group(3).lower())
+                                if len(w) >= 3 and w not in _CONCERN_STOPWORDS)
+              if len(words) < 3:
+                  return None
+              return m.group(1), path, words
+
+
+          def concern_match(title: str, prior_titles) -> "str | None":
+              """The prior title raising the same concern as `title`, or None.
+
+              A CRITICAL is never absorbed this way. It still gets the exact and file:line checks.
+              """
+              mine = _concern_parts(title)
+              if mine is None or mine[0] == "CRITICAL":
+                  return None
+              sev, path, words = mine
+              for prior in prior_titles:
+                  theirs = _concern_parts(prior)
+                  if theirs is None or theirs[0] != sev or theirs[1] != path:
+                      continue
+                  if len(words & theirs[2]) / len(words | theirs[2]) >= _CONCERN_MIN_OVERLAP:
+                      return prior
+              return None
+
+
+          def comment_issue(token: str, repo: str, number: int, body: str) -> None:
+              with httpx.Client(timeout=_TIMEOUT) as client:
+                  resp = client.post(
+                      f"{GITHUB_API}/repos/{repo}/issues/{number}/comments",
+                      headers=_headers(token), json={"body": body[:65_000]},
+                  )
+                  resp.raise_for_status()
+
+
+          def redetected_comment(finding: dict, merge_sha: str, run_url: str) -> str:
+              return "\n".join([
+                  "**Re-detected** by legal-capture at a new location; concern-matched to this "
+                  "wont-fix disposition, so no new issue was filed. Reopen if the concern is "
+                  "materially different.",
+                  "",
+                  f"**Location:** `{finding['location']}`",
+                  f"**Title:** {finding['title']}",
+                  f"**Merge commit:** `{merge_sha[:12]}`",
+                  "",
+                  finding["description"],
+                  "",
+                  f"_[Run]({run_url})_",
+              ])
 
 
           def _load_repo_local_suppressions() -> list[dict]:
@@ -1405,7 +1479,27 @@ jobs:
                   if is_suppressed:
                       print(f"  Suppressed (wont-fix): {title[:80]}")
                       continue
-                  if title in existing or (loc_key and loc_key in existing_location_keys):
+                  tracked = title in existing or (loc_key and loc_key in existing_location_keys)
+                  if not tracked:
+                      # Concern-level dedupe (#34): only after every exact check missed.
+                      open_concern = concern_match(title, existing)
+                      if open_concern:
+                          print(f"  Already tracked (concern match: {open_concern[:80]}): "
+                                f"{title[:80]}")
+                          continue
+                      wontfix_concern = concern_match(title, suppressed)
+                      number = suppressed[wontfix_concern] if wontfix_concern else 0
+                      if number:
+                          try:
+                              comment_issue(token, repo, number,
+                                            redetected_comment(finding, after, run_url))
+                              print(f"  Suppressed (wont-fix concern match, commented on "
+                                    f"#{number}): {title[:80]}")
+                              continue
+                          except Exception as exc:  # noqa: BLE001 -- any failure must file
+                              print(f"  WARNING: re-detection comment on #{number} failed "
+                                    f"({exc}); filing instead: {title[:80]}")
+                  if tracked:
                       print(f"  Already tracked: {title[:80]}")
                       if sev == "CRITICAL":
                           criticals_already_tracked += 1
